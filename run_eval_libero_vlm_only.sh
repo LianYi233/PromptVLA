@@ -36,9 +36,9 @@ for value in "$TOKENS" "$STEP" "$EPISODES_PER_TASK"; do
   if [[ ! "$value" =~ ^[1-9][0-9]*$ ]]; then echo "Tokens/step/episodes must be positive integers" >&2; exit 2; fi
 done
 if [[ ! "$EVAL_SEED" =~ ^(0|[1-9][0-9]*)$ ]]; then echo "Invalid EVAL_SEED" >&2; exit 2; fi
-export TOKENIZER_PATH="${TOKENIZER_PATH:-/root/autodl-tmp/models/google/paligemma-3b-pt-224}"
-export CKPT_ROOT="${CKPT_ROOT:-/root/autodl-tmp/chkpt/2601-lerobot/vlm-only}"
-export BASE_OUTPUT="${BASE_OUTPUT:-/root/autodl-tmp/eval/vlm-only}"
+export TOKENIZER_PATH="${TOKENIZER_PATH:-/home/wyn/models/paligemma-3b-pt-224}"
+export CKPT_ROOT="${CKPT_ROOT:-/data1/wyn/chkpt/2601-lerobot/PromptVLA}"
+export BASE_OUTPUT="${BASE_OUTPUT:-$CKPT_ROOT/eval}"
 export PYTHONPATH="$SCRIPT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 export LEROBOT_EVAL_FINETUNED_PROMPT=1
 DRY_RUN="${DRY_RUN:-false}"
@@ -47,9 +47,9 @@ if [[ ! -d "$TOKENIZER_PATH" ]]; then echo "Tokenizer directory not found: $TOKE
 select_source() {
   KIND="$1"
   if [[ "$KIND" == base ]]; then
-    SOURCE_PATH="${PRETRAINED_PATH:-${BASE_PRETRAINED_PATH:-/root/autodl-tmp/models/pi05_libero_base}}"
+    SOURCE_PATH="${PRETRAINED_PATH:-${BASE_PRETRAINED_PATH:-/home/wyn/models/lerobot/pi05_libero_base}}"
   else
-    SOURCE_PATH="${PRETRAINED_PATH:-${FINETUNED_PRETRAINED_PATH:-/root/autodl-tmp/models/pi05_libero_finetuned_v044}}"
+    SOURCE_PATH="${PRETRAINED_PATH:-${FINETUNED_PRETRAINED_PATH:-/home/wyn/models/lerobot/pi05_libero_finetuned_v044}}"
   fi
   NAME="${RUN_NAME:-pi05-${KIND}-vlm${TOKENS}-seed${SEED}}"
   INITIAL="$CKPT_ROOT/$NAME/checkpoints/000000/pretrained_model"

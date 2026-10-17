@@ -2,8 +2,8 @@
 
 ```bash
 env -u PRETRAINED_PATH -u RUN_NAME -u VLM_PROMPT_TOKENS \
-OUTPUT_ROOT=/root/autodl-tmp/chkpt/2601-lerobot/vlm-only \
-LOG_ROOT=/root/autodl-tmp/logs/vlm-only \
+OUTPUT_ROOT=/data1/wyn/chkpt/2601-lerobot/PromptVLA \
+LOG_ROOT=/data1/wyn/chkpt/2601-lerobot/logs \
 GPU_IDS=0,1 BATCH_SIZE=32 \
 VLM_PROMPT_TOKEN_COUNTS="1 2 4 8 16 32" \
 bash examples/training/train_pi05_vlm_only_rank_sweep.sh 1 \
@@ -14,8 +14,9 @@ bash examples/training/train_pi05_vlm_only_rank_sweep.sh 1 \
 This sequentially trains `pi05-base-vlm{1,2,4,8,16,32}-seed1` from the same base
 checkpoint. Both GPUs train each model with batch 32 **per GPU** (global batch 64).
 The existing base QUANTILES processors, learning-rate schedule and frozen-backbone
-VLM-only setup are retained. Input models/tokenizer/dataset default to
-`/root/autodl-fs/wyn/`; outputs default to `/root/autodl-tmp/`.
+VLM-only setup are retained. Input models/tokenizer default to `/home/wyn/models/`,
+the dataset to `/home/wyn/datasets/libero`, checkpoints to
+`/data1/wyn/chkpt/2601-lerobot/PromptVLA`, and logs to `/data1/wyn/chkpt/2601-lerobot/logs`.
 Only the final **full** checkpoint, `checkpoints/003000`, is saved. The diagnostic
 also saves tiny prompt-only snapshots; it never saves intermediate backbone weights.
 `torch.compile` is disabled. Existing run directories cause an error before training.
@@ -28,14 +29,14 @@ consumes random draws before prompt initialization. The existing monitor saves t
 actual initial values in `prompt_rank/step_000000.npz`, key `prompt`. Do not use
 `step_003000.npz` or final model weights for this experiment.
 
-先在两台机器更新同一 `vlm-only` 版本。源服务器导出实际 seed1 初始 prompt：
+先在两台机器使用同一 PromptVLA 代码版本；以下 `/path/to/prompt-inits` 是占位路径，需替换为实际目录。源服务器导出实际 seed1 初始 prompt：
 
 ```bash
-cd /root/PromptVLA
+cd /home/wyn/VLAA/PromptVLA
 python -m lerobot.scripts.export_pi05_prompt_init export \
-  /root/autodl-tmp/chkpt/2601-lerobot/vlm-only/pi05-base-vlm2-seed1 \
+  /data1/wyn/chkpt/2601-lerobot/PromptVLA/pi05-base-vlm2-seed1 \
   --expect-seed 1 \
-  --output /root/autodl-tmp/prompt-inits/pi05-base-vlm2-init-seed1.safetensors
+  --output /path/to/prompt-inits/pi05-base-vlm2-init-seed1.safetensors
 ```
 
 This reads the step-zero NPZ, probe manifest and a saved `train_config.json`.
@@ -45,27 +46,27 @@ The completed 3000-step checkpoint is used only to read training configuration;
 its learned prompt is **never** exported. If step zero is missing, export fails
 instead of silently substituting trained weights. Existing export files are not overwritten.
 
-把这一份 `.safetensors` 文件下载后上传到另一台服务器，例如放在 `/root/`。
+把这一份 `.safetensors` 文件下载后上传到另一台服务器，放在实际的 prompt 初始化目录。
 无需复制完整模型或优化器。两台机器可以互相 SSH 访问时，也可在源服务器使用：
 
 ```bash
 scp -P <目标SSH端口> \
-  /root/autodl-tmp/prompt-inits/pi05-base-vlm2-init-seed1.safetensors \
-  root@<目标服务器地址>:/root/
+  /path/to/prompt-inits/pi05-base-vlm2-init-seed1.safetensors \
+  <用户名>@<目标服务器地址>:/path/to/prompt-inits/
 ```
 
 目标服务器验证文件，然后训练：
 
 ```bash
-cd /root/PromptVLA
+cd /home/wyn/VLAA/PromptVLA
 python -m lerobot.scripts.export_pi05_prompt_init check \
-  /root/pi05-base-vlm2-init-seed1.safetensors --tokens 2
+  /path/to/prompt-inits/pi05-base-vlm2-init-seed1.safetensors --tokens 2
 
 env -u PRETRAINED_PATH -u RUN_NAME -u VLM_PROMPT_TOKENS \
-OUTPUT_ROOT=/root/autodl-tmp/chkpt/2601-lerobot/vlm-only \
-LOG_ROOT=/root/autodl-tmp/logs/vlm-only \
+OUTPUT_ROOT=/data1/wyn/chkpt/2601-lerobot/PromptVLA \
+LOG_ROOT=/data1/wyn/chkpt/2601-lerobot/logs \
 RUN_PREFIX=pi05-init1-train0 \
-PROMPT_INIT_PATH=/root/pi05-base-vlm2-init-seed1.safetensors \
+PROMPT_INIT_PATH=/path/to/prompt-inits/pi05-base-vlm2-init-seed1.safetensors \
 GPU_IDS=0,1 BATCH_SIZE=32 VLM_PROMPT_TOKEN_COUNTS="2" \
 RANK_FREQ=250 RANK_SAMPLES=16 RANK_OUTPUT_PROBES=4 \
 RANK_SEED=2026 RANK_TIMESTEPS='[0.2,0.5,0.8]' \
@@ -113,10 +114,10 @@ For token=8, seed0, using the same two-GPU setup as the training controls:
 ```bash
 env -u PRETRAINED_PATH -u RUN_NAME -u VLM_PROMPT_TOKENS \
     -u PROMPT_INIT_PATH -u PROMPT_EXPORT_REFERENCE \
-OUTPUT_ROOT=/root/autodl-tmp/chkpt/2601-lerobot/vlm-only \
-LOG_ROOT=/root/autodl-tmp/logs/vlm-only \
+OUTPUT_ROOT=/data1/wyn/chkpt/2601-lerobot/PromptVLA \
+LOG_ROOT=/data1/wyn/chkpt/2601-lerobot/logs \
 RUN_PREFIX=pi05-init-rebuild \
-PROMPT_EXPORT_PATH=/root/autodl-fs/wyn/prompt-inits/pi05-base-vlm8-init-seed0.safetensors \
+PROMPT_EXPORT_PATH=/path/to/prompt-inits/pi05-base-vlm8-init-seed0.safetensors \
 GPU_IDS=0,1 BATCH_SIZE=32 VLM_PROMPT_TOKEN_COUNTS="8" \
 bash examples/training/train_pi05_vlm_only_rank_sweep.sh 0 --wandb.enable=false
 ```
@@ -135,7 +136,7 @@ If the completed `init1/train0` token=8 run still has `prompt_init.json`, add th
 environment assignment to the export command (after the `env -u` options):
 
 ```bash
-PROMPT_EXPORT_REFERENCE=/root/autodl-tmp/chkpt/2601-lerobot/vlm-only/pi05-init1-train0-base-vlm8-seed0/prompt_init.json
+PROMPT_EXPORT_REFERENCE=/data1/wyn/chkpt/2601-lerobot/PromptVLA/pi05-init1-train0-base-vlm8-seed0/prompt_init.json
 ```
 
 This compares the regenerated tensor against `replaced_prompt_sha256`: the native
@@ -152,10 +153,10 @@ Then train the missing init0/train1 experiment with the exported file:
 ```bash
 env -u PRETRAINED_PATH -u RUN_NAME -u VLM_PROMPT_TOKENS \
     -u PROMPT_EXPORT_PATH -u PROMPT_EXPORT_REFERENCE \
-OUTPUT_ROOT=/root/autodl-tmp/chkpt/2601-lerobot/vlm-only \
-LOG_ROOT=/root/autodl-tmp/logs/vlm-only \
+OUTPUT_ROOT=/data1/wyn/chkpt/2601-lerobot/PromptVLA \
+LOG_ROOT=/data1/wyn/chkpt/2601-lerobot/logs \
 RUN_PREFIX=pi05-init0-train1 \
-PROMPT_INIT_PATH=/root/autodl-fs/wyn/prompt-inits/pi05-base-vlm8-init-seed0.safetensors \
+PROMPT_INIT_PATH=/path/to/prompt-inits/pi05-base-vlm8-init-seed0.safetensors \
 GPU_IDS=0,1 BATCH_SIZE=32 VLM_PROMPT_TOKEN_COUNTS="8" \
 RANK_FREQ=250 RANK_SAMPLES=16 RANK_OUTPUT_PROBES=4 \
 RANK_SEED=2026 RANK_TIMESTEPS='[0.2,0.5,0.8]' \
@@ -274,9 +275,9 @@ bash examples/analysis/analyze_pi05_vlm_rank_sweep.sh plots 1
 ```bash
 env -u PRETRAINED_PATH -u RUN_NAME -u VLM_PROMPT_TOKENS \
     -u BASE_CKPT -u BASE_MODEL_PATH \
-CKPT_ROOT=/root/autodl-tmp/chkpt/2601-lerobot/vlm-only \
-BASE_OUTPUT=/root/autodl-tmp/eval/vlm-only \
-REPORT_ROOT=/root/autodl-tmp/analysis/vlm-only \
+CKPT_ROOT=/data1/wyn/chkpt/2601-lerobot/PromptVLA \
+BASE_OUTPUT=/data1/wyn/chkpt/2601-lerobot/PromptVLA/eval \
+REPORT_ROOT=/data1/wyn/chkpt/2601-lerobot/PromptVLA/analysis \
 VLM_PROMPT_TOKEN_COUNTS="1 2 4 8 16 32" \
 GPU_ID=1 \
 bash examples/analysis/analyze_pi05_vlm_rank_sweep.sh all 1
@@ -331,7 +332,7 @@ NPZ 保存训练/独立投影的 Gram、交叉 Gram 及残差，可离线调整 
 ### 报告内容
 
 默认完整报告目录：
-`/root/autodl-tmp/analysis/vlm-only/pi05-base-seed1/complete/`。
+`/data1/wyn/chkpt/2601-lerobot/PromptVLA/analysis/pi05-base-seed1/complete/`。
 仅画谱的 `plots` 模式使用同级 `spectra/` 子目录。
 
 | 文件 | 内容 |

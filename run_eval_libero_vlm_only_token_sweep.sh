@@ -14,14 +14,15 @@ Same evaluation protocol: EVAL_SEED=1000, 10 episodes/task, n_action_steps=10.
 Terminal output shows one in-place episode progress bar, then final success rates.
 The bar shows model index, completed/total episodes, elapsed time and this model's ETA.
 PROGRESS=auto (default) shows it in a terminal; true forces it, false hides it.
-Full output (including errors/video paths) is saved under BASE_OUTPUT/logs;
+Full output (including errors/video paths) is saved under LOG_ROOT/eval
+(LOG_ROOT defaults to /data1/wyn/chkpt/2601-lerobot/logs);
 EVAL_LOG_ROOT can override that log directory. On failure, print the log path.
 Existing per-task resume checks still apply. Videos are still saved as before.
 DRY_RUN=true checks all models and prints commands without starting evaluation or writing logs.
 
-CKPT_ROOT defaults to /root/autodl-tmp/chkpt/2601-lerobot/vlm-only
-BASE_OUTPUT defaults to /root/autodl-tmp/eval/vlm-only
-Input models/tokenizer default to /root/autodl-fs/wyn/models.
+CKPT_ROOT defaults to /data1/wyn/chkpt/2601-lerobot/PromptVLA
+BASE_OUTPUT defaults to CKPT_ROOT/eval
+Input models/tokenizer default to /home/wyn/models.
 Other overrides: BASE_PRETRAINED_PATH, FINETUNED_PRETRAINED_PATH, TOKENIZER_PATH,
 RUN_PREFIX (pi05), VLM_PROMPT_TOKEN_COUNTS, EPISODES_PER_TASK, EVAL_SEED, CHECKPOINT_STEP.
 Unset RUN_NAME, PRETRAINED_PATH, VLM_PROMPT_TOKENS, BASE_CKPT and BASE_MODEL_PATH.
@@ -68,13 +69,13 @@ done
 for value in "$SEED" "$EVAL_SEED"; do
   if [[ ! "$value" =~ ^(0|[1-9][0-9]*)$ ]]; then echo "Invalid seed" >&2; exit 2; fi
 done
-export BASE_PRETRAINED_PATH="${BASE_PRETRAINED_PATH:-/root/autodl-fs/wyn/models/pi05_libero_base}"
-export FINETUNED_PRETRAINED_PATH="${FINETUNED_PRETRAINED_PATH:-/root/autodl-fs/wyn/models/pi05_libero_finetuned_v044}"
-export TOKENIZER_PATH="${TOKENIZER_PATH:-/root/autodl-fs/wyn/models/google/paligemma-3b-pt-224}"
-export CKPT_ROOT="${CKPT_ROOT:-/root/autodl-tmp/chkpt/2601-lerobot/vlm-only}"
-export BASE_OUTPUT="${BASE_OUTPUT:-/root/autodl-tmp/eval/vlm-only}"
+export BASE_PRETRAINED_PATH="${BASE_PRETRAINED_PATH:-/home/wyn/models/lerobot/pi05_libero_base}"
+export FINETUNED_PRETRAINED_PATH="${FINETUNED_PRETRAINED_PATH:-/home/wyn/models/lerobot/pi05_libero_finetuned_v044}"
+export TOKENIZER_PATH="${TOKENIZER_PATH:-/home/wyn/models/paligemma-3b-pt-224}"
+export CKPT_ROOT="${CKPT_ROOT:-/data1/wyn/chkpt/2601-lerobot/PromptVLA}"
+export BASE_OUTPUT="${BASE_OUTPUT:-$CKPT_ROOT/eval}"
 export TQDM_DISABLE=1
-EVAL_LOG_ROOT="${EVAL_LOG_ROOT:-$BASE_OUTPUT/logs}"
+export EVAL_LOG_ROOT="${EVAL_LOG_ROOT:-${LOG_ROOT:-/data1/wyn/chkpt/2601-lerobot/logs}/eval}"
 STEP_PADDED=$(printf '%06d' "$CHECKPOINT_STEP")
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 TOTAL_MODELS=$((${#SOURCES[@]} * ${#TOKEN_COUNTS[@]}))

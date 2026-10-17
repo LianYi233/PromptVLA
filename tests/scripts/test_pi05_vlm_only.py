@@ -58,6 +58,7 @@ class VLMOnlyTest(unittest.TestCase):
             "LOG_ROOT": str(self.work / "logs"),
             "CKPT_ROOT": str(self.work / "checkpoints"),
             "BASE_OUTPUT": str(self.work / "eval"),
+            "EVAL_LOG_ROOT": str(self.work / "eval/logs"),
         }
 
     def source(self, kind):
@@ -215,7 +216,9 @@ class VLMOnlyTest(unittest.TestCase):
         capture = self.install_fake_evaluator()
         output = self.work / "eval"
         output.mkdir()
-        stale = output / "eval_pi05-base-vlm2-seed0-libero-all4-summary.log"
+        log_root = Path(self.env["EVAL_LOG_ROOT"])
+        log_root.mkdir(parents=True)
+        stale = log_root / "eval_pi05-base-vlm2-seed0-libero-all4-summary.log"
         stale.write_text("STALE SUCCESS RATE: 12.34%\n")
         result = self.run_script(EVAL_SWEEP, DRY_RUN="false", GPU_ID="1")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -231,7 +234,7 @@ class VLMOnlyTest(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         for noise in ("STALE", "progress-noise", ".mp4", "per-task", "No step-0"):
             self.assertNotIn(noise, result.stdout)
-        logs = list((output / "logs").glob("*.log"))
+        logs = list(log_root.glob("pi05-*.log"))  # one timestamped sweep log per model
         self.assertEqual(len(logs), 4)
         for log in logs:
             self.assertIn("progress-noise", log.read_text())

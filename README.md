@@ -60,28 +60,38 @@ preserved in this snapshot; the LFS object store was not copied. These fixtures
 are not used by the PI0.5/LIBERO experiment scripts, which load the external
 models, datasets, and assets.
 
-Local paths for pretrained models, the tokenizer, datasets, LIBERO assets, prompt
-initializations, checkpoints, and logs have not yet been configured. Set the
-scripts' resource and output path overrides to the actual local locations before
-training or evaluation. The scripts still contain historical AutoDL defaults.
-The availability of four GPUs does not change the experiment recipe automatically;
-preserve the intended global batch size when choosing how many GPUs each run uses.
+### Local resource paths
 
-### Previous AutoDL paths (reference only)
+The VLM-only launchers default to the following paths. Explicit environment
+variables still override them; unset stale AutoDL overrides in an existing shell.
 
-| Resource | Historical location |
+| Resource | Default location / setting |
 | --- | --- |
-| Base model | `/root/autodl-fs/wyn/models/pi05_libero_base` |
-| Finetuned model | `/root/autodl-fs/wyn/models/pi05_libero_finetuned_v044` |
-| Tokenizer | `/root/autodl-fs/wyn/models/google/paligemma-3b-pt-224` |
-| LIBERO dataset | `/root/autodl-fs/wyn/datasets/libero` |
-| LIBERO assets | `/root/autodl-fs/wyn/libero-assets` |
-| Exported prompt initializations | `/root/autodl-fs/wyn/prompt-inits` |
-| Checkpoints | `/root/autodl-tmp/chkpt/2601-lerobot/vlm-only` |
-| Training logs | `/root/autodl-tmp/logs/vlm-only` |
-| Evaluation results | `/root/autodl-tmp/eval/vlm-only` |
+| Base model | `BASE_PRETRAINED_PATH=/home/wyn/models/lerobot/pi05_libero_base` |
+| Finetuned model | `FINETUNED_PRETRAINED_PATH=/home/wyn/models/lerobot/pi05_libero_finetuned_v044` |
+| Tokenizer | `TOKENIZER_PATH=/home/wyn/models/paligemma-3b-pt-224` |
+| LIBERO dataset | `DATASET_ROOT=/home/wyn/datasets/libero` |
+| Checkpoints (training / evaluation) | `OUTPUT_ROOT` / `CKPT_ROOT`: `/data1/wyn/chkpt/2601-lerobot/PromptVLA` |
+| Training logs | `LOG_ROOT=/data1/wyn/chkpt/2601-lerobot/logs` |
+| Evaluation logs | `EVAL_LOG_ROOT`: `$LOG_ROOT/eval` |
+| Evaluation results | `BASE_OUTPUT`: `$CKPT_ROOT/eval` |
+| Temporary files | `TMPDIR`: `$OUTPUT_ROOT/.runtime/tmp` |
+| Compiler caches | `TORCHINDUCTOR_CACHE_DIR` / `TRITON_CACHE_DIR`: `$OUTPUT_ROOT/.runtime/cache/{torchinductor,triton}/$RUN_NAME` |
+
+LIBERO assets and exported prompt initialization locations are still to be supplied.
+Configure LIBERO's local asset paths (including any package asset symlinks) before
+evaluation. `LIBERO_CONFIG_PATH` defaults to `/home/wyn/.libero`; that directory alone
+does not configure the assets. P/D/E/T training requires an explicit `PROMPT_INIT_DIR`
+containing the exported seed0/seed1 files and stops before training if it is unset.
+Ordinary VLM-only training does not require those files.
+
+The availability of four GPUs does not change the experiment recipe automatically;
+the token/rank/PDET sweeps still default to two GPUs and batch 32 per GPU. Keep
+world size and batch size fixed across controlled comparisons.
 
 The migration does not move model weights, datasets, or experiment outputs.
+When evaluating old AutoDL checkpoints, their source-path provenance check may need
+a verified migration: `train_config.json` records the original absolute model path.
 W&B continues to use the `prompt-learning` project for comparison with existing runs.
 
 ## Experiment entry points

@@ -24,6 +24,7 @@ class LiberoTokenSweepTest(unittest.TestCase):
             "HOME": os.environ["HOME"],
             "CKPT_ROOT": str(self.work / "checkpoints"),
             "BASE_OUTPUT": str(self.work / "results"),
+            "EVAL_LOG_ROOT": str(self.work / "results"),
             "DRY_RUN": "true",
         }
         for count in (1, 2, 8, 16):

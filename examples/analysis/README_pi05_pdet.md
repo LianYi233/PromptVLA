@@ -38,21 +38,21 @@ P1 不保证坏，P0 不保证好；两者是初始化身份标签，实际张�
 先确认这些文件都在（不需要旧服务器的完整训练模型）：
 
 ```text
-/root/autodl-fs/wyn/prompt-inits/pi05-base-vlm2-init-seed0.safetensors
-/root/autodl-fs/wyn/prompt-inits/pi05-base-vlm2-init-seed1.safetensors
+/path/to/prompt-inits/pi05-base-vlm2-init-seed0.safetensors
+/path/to/prompt-inits/pi05-base-vlm2-init-seed1.safetensors
 ```
 
-在新 AutoDL 服务器运行：
+在本地 A100 服务器运行（把 `/path/to/prompt-inits` 替换为两个初始化文件实际所在的目录）：
 
 ```bash
-cd /root/PromptVLA
+cd /home/wyn/VLAA/PromptVLA
 git pull --ff-only origin main
 
 env -u PRETRAINED_PATH -u RUN_NAME -u VLM_PROMPT_TOKENS \
     -u PROMPT_INIT_PATH -u PROMPT_EXPORT_PATH -u PROMPT_EXPORT_REFERENCE \
-OUTPUT_ROOT=/root/autodl-tmp/chkpt/2601-lerobot/vlm-only \
-LOG_ROOT=/root/autodl-tmp/logs/vlm-only \
-PROMPT_INIT_DIR=/root/autodl-fs/wyn/prompt-inits \
+OUTPUT_ROOT=/data1/wyn/chkpt/2601-lerobot/PromptVLA \
+LOG_ROOT=/data1/wyn/chkpt/2601-lerobot/logs \
+PROMPT_INIT_DIR=/path/to/prompt-inits \
 RUN_PREFIX=pi05-pdet GPU_IDS=0,1 BATCH_SIZE=32 \
 PDET_CASES="1111 0000 0111 1011 1101 1110 1000" \
 RANK_FREQ=250 RANK_SAMPLES=16 RANK_OUTPUT_PROBES=4 \
@@ -65,7 +65,9 @@ bash examples/training/train_pi05_vlm_only_pdet_sweep.sh \
 若想分阶段，先设置 `PDET_CASES="1111 0000"` 跑两个参考组，再用
 `PDET_CASES="0111 1011 1101 1110 1000"` 补齐。`DRY_RUN=true` 只检查并打印命令。
 已有目录不会覆盖或自动跳过，中断后明确选择剩余 case；新一轮可改 RUN_PREFIX。
-输入模型、tokenizer 和数据集默认在 `/root/autodl-fs/wyn/`，模型输出默认在 autodl-tmp。
+输入模型/tokenizer 默认在 `/home/wyn/models/`，数据集在 `/home/wyn/datasets/libero`。
+模型输出默认在 `/data1/wyn/chkpt/2601-lerobot/PromptVLA`，日志在 `/data1/wyn/chkpt/2601-lerobot/logs`。
+`PROMPT_INIT_DIR` 必须显式设置；LIBERO assets 路径需在测试前配置。
 
 ## 检查隔离是否有效
 
@@ -78,7 +80,7 @@ bash examples/training/train_pi05_vlm_only_pdet_sweep.sh \
 
 ```bash
 python -m lerobot.scripts.pdet_experiment audit \
-  /root/autodl-tmp/chkpt/2601-lerobot/vlm-only/pi05-pdet-base-vlm2-P*-D*-E*-T*
+  /data1/wyn/chkpt/2601-lerobot/PromptVLA/pi05-pdet-base-vlm2-P*-D*-E*-T*
 ```
 
 例如 1111 与 1101 必须 P、sample IDs 和 time 完全相同，只有 noise 不同。
@@ -90,11 +92,11 @@ python -m lerobot.scripts.pdet_experiment audit \
 单模型评估可直接使用既有脚本，固定 EVAL_SEED，与训练 D/E/T 分开：
 
 ```bash
-PRETRAINED_PATH=/root/autodl-fs/wyn/models/pi05_libero_base \
-TOKENIZER_PATH=/root/autodl-fs/wyn/models/google/paligemma-3b-pt-224 \
-CKPT_ROOT=/root/autodl-tmp/chkpt/2601-lerobot/vlm-only \
+PRETRAINED_PATH=/home/wyn/models/lerobot/pi05_libero_base \
+TOKENIZER_PATH=/home/wyn/models/paligemma-3b-pt-224 \
+CKPT_ROOT=/data1/wyn/chkpt/2601-lerobot/PromptVLA \
 RUN_NAME=pi05-pdet-base-vlm2-P1-D1-E1-T1 \
-BASE_OUTPUT=/root/autodl-tmp/eval/vlm-only \
+BASE_OUTPUT=/data1/wyn/chkpt/2601-lerobot/PromptVLA/eval \
 GPU_ID=1 VLM_PROMPT_TOKENS=2 CHECKPOINT_STEP=3000 EVAL_SEED=1000 \
 bash run_eval_libero_vlm_only.sh base trained all 0
 ```

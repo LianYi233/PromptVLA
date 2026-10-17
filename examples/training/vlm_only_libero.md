@@ -32,7 +32,8 @@ VLM prompt 读取 observations 和自己的 prompt 块，action tokens 读取完
 首次迁移到独立 PromptVLA 目录：
 
 ```bash
-cd /root
+mkdir -p /home/wyn/VLAA
+cd /home/wyn/VLAA
 GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/LianYi233/PromptVLA.git
 cd PromptVLA
 conda activate lerobot
@@ -40,22 +41,22 @@ python -m pip install --no-deps -e .
 python -c 'import lerobot; print(lerobot.__file__)'
 ```
 
-包路径应指向 `/root/PromptVLA/src/lerobot/`。已有模型和输出目录继续使用，无需移动。
+包路径应指向 `/home/wyn/VLAA/PromptVLA/src/lerobot/`。模型和数据使用下列本地路径；旧 AutoDL 输出不会自动迁移。
 这一步会把当前 Python 环境的 editable 安装指向新代码；请等旧目录中的训练结束后再切换。
 
 后续更新：
 
 ```bash
-cd /root/PromptVLA
+cd /home/wyn/VLAA/PromptVLA
 git pull --ff-only origin main
 ```
 
 激活已有 LeRobot 环境并安装此 checkout（`pip install -e .`）。默认路径：
 
-- dataset：`/root/autodl-tmp/datasets/libero`
-- base：`/root/autodl-tmp/models/pi05_libero_base`
-- v044：`/root/autodl-tmp/models/pi05_libero_finetuned_v044`
-- tokenizer：`/root/autodl-tmp/models/google/paligemma-3b-pt-224`
+- dataset：`/home/wyn/datasets/libero`
+- base：`/home/wyn/models/lerobot/pi05_libero_base`
+- v044：`/home/wyn/models/lerobot/pi05_libero_finetuned_v044`
+- tokenizer：`/home/wyn/models/paligemma-3b-pt-224`
 
 模型目录必须包含完整权重、config 和 pre/postprocessor 文件，v044 还需要它们引用的统计量文件。
 缺少模型时可以沿用 `HF_HUB_DISABLE_XET=1 hf download ... --local-dir ... --max-workers 1` 下载。
@@ -98,9 +99,9 @@ VLM_PROMPT_TOKENS=16 GPU_IDS=0,1 BATCH_SIZE=32 \
 bash examples/training/train_pi05_vlm_only_pair.sh 0 --policy.optimizer_lr=1e-5
 ```
 
-默认输出根目录：`/root/autodl-tmp/chkpt/2601-lerobot/vlm-only`。
+默认输出根目录：`/data1/wyn/chkpt/2601-lerobot/PromptVLA`。
 run 名称：`pi05-base-vlm1-seed0`、`pi05-finetuned-vlm1-seed0`。
-日志在 `/root/autodl-tmp/logs/vlm-only`。保存 `000000`、`001000`、`002000`、`003000` 的完整模型；
+日志在 `/data1/wyn/chkpt/2601-lerobot/logs`。保存 `000000`、`001000`、`002000`、`003000` 的完整模型；
 两组共 8 份 checkpoint，需预留相应磁盘空间。`SAVE_FREQ=3000` 可只保存初始化和最终模型。
 
 ### 两个来源分别训练 8、16、32、64 个 token，只保存 3000 步
@@ -111,16 +112,16 @@ run 名称：`pi05-base-vlm1-seed0`、`pi05-finetuned-vlm1-seed0`。
 
 ```bash
 env -u PRETRAINED_PATH -u RUN_NAME -u VLM_PROMPT_TOKENS \
-OUTPUT_ROOT=/root/autodl-tmp/chkpt/2601-lerobot/vlm-only \
-LOG_ROOT=/root/autodl-tmp/logs/vlm-only \
+OUTPUT_ROOT=/data1/wyn/chkpt/2601-lerobot/PromptVLA \
+LOG_ROOT=/data1/wyn/chkpt/2601-lerobot/logs \
 GPU_IDS=0,1 BATCH_SIZE=32 VLM_PROMPT_TOKEN_COUNTS="8 16 32 64" \
 bash examples/training/train_pi05_vlm_only_token_sweep.sh both 0 \
   --wandb.enable=true --wandb.project=prompt-learning \
   --wandb.mode=online --wandb.disable_artifact=true
 ```
 
-此入口默认模型、tokenizer 和数据集从 `/root/autodl-fs/wyn/` 读取，训练输出和日志写到
-`/root/autodl-tmp/`。每卡 batch 32、全局 batch 64；学习率保持 `2.5e-5`。
+此入口默认模型/tokenizer 从 `/home/wyn/models/` 读取，数据集在 `/home/wyn/datasets/libero`，
+checkpoint 写到 `/data1/wyn/chkpt/2601-lerobot/PromptVLA`，日志写到 `/data1/wyn/chkpt/2601-lerobot/logs`。每卡 batch 32、全局 batch 64；学习率保持 `2.5e-5`。
 默认关闭 `torch.compile`，保留 bf16 和 gradient checkpointing。
 固定 `FLOW_STEPS=3000`、`SAVE_ONLY_FINAL=true`，只保存 `003000`；
 token=8/16/32/64 分别训练 16384/32768/65536/131072 个参数。
@@ -143,9 +144,9 @@ bash examples/training/train_pi05_vlm_only_token_sweep.sh finetuned 0
 评测入口不变；例如测 base-token8：
 
 ```bash
-BASE_PRETRAINED_PATH=/root/autodl-fs/wyn/models/pi05_libero_base \
-TOKENIZER_PATH=/root/autodl-fs/wyn/models/google/paligemma-3b-pt-224 \
-CKPT_ROOT=/root/autodl-tmp/chkpt/2601-lerobot/vlm-only \
+BASE_PRETRAINED_PATH=/home/wyn/models/lerobot/pi05_libero_base \
+TOKENIZER_PATH=/home/wyn/models/paligemma-3b-pt-224 \
+CKPT_ROOT=/data1/wyn/chkpt/2601-lerobot/PromptVLA \
 GPU_ID=0 VLM_PROMPT_TOKENS=8 CHECKPOINT_STEP=3000 \
 bash run_eval_libero_vlm_only.sh base trained all 0
 ```
@@ -157,13 +158,13 @@ bash run_eval_libero_vlm_only.sh base trained all 0
 
 批量评测入口默认选择 `base-vlm2`、`base-vlm4`、`finetuned-vlm2`、`finetuned-vlm4`，
 依次在同一张 GPU 上评测 `003000`，四套 LIBERO、每套 100 次、每个模型共 400 次。
-输入模型/tokenizer 默认在 `/root/autodl-fs/wyn/models/`，checkpoint 默认在
-`/root/autodl-tmp/chkpt/2601-lerobot/vlm-only/`，与上面的批量训练目录一致。
+输入模型/tokenizer 默认在 `/home/wyn/models/`，checkpoint 默认在
+`/data1/wyn/chkpt/2601-lerobot/PromptVLA/`，与上面的批量训练目录一致。
 
 ```bash
 env -u PRETRAINED_PATH -u RUN_NAME -u VLM_PROMPT_TOKENS -u BASE_CKPT -u BASE_MODEL_PATH \
-CKPT_ROOT=/root/autodl-tmp/chkpt/2601-lerobot/vlm-only \
-BASE_OUTPUT=/root/autodl-tmp/eval/vlm-only \
+CKPT_ROOT=/data1/wyn/chkpt/2601-lerobot/PromptVLA \
+BASE_OUTPUT=/data1/wyn/chkpt/2601-lerobot/PromptVLA/eval \
 GPU_ID=1 VLM_PROMPT_TOKEN_COUNTS="2 4" CHECKPOINT_STEP=3000 \
 bash run_eval_libero_vlm_only_token_sweep.sh both all 0
 ```
@@ -173,7 +174,7 @@ bash run_eval_libero_vlm_only_token_sweep.sh both all 0
 模型/环境加载期间显示加载状态，开始 rollout 后才估算 ETA。ETA 针对当前模型，
 不同任务的耗时会影响估计；续跑计数包含已保存任务，速度根据本次运行估算。
 每个模型完成后显示其名称、四个 suite 和 overall 成功率。
-逐任务输出、视频路径和完整异常写入 `BASE_OUTPUT/logs/` 中本次调用独立的日志；
+逐任务输出、视频路径和完整异常写入 `EVAL_LOG_ROOT`（默认 `/data1/wyn/chkpt/2601-lerobot/logs/eval/`）中本次调用独立的日志；
 视频仍按原脚本保存。不会从累计 summary 日志读取结果，避免打印上次结果或重复结果。
 重定向输出时默认不显示动态进度，避免日志刷屏。`PROGRESS=true` 强制显示，
 `PROGRESS=false` 恢复完全静默、只输出最终成功率。
@@ -193,16 +194,16 @@ bash run_eval_libero_vlm_only_token_sweep.sh both all 0
 它覆盖 `SAVE_FREQ`；只设置 `SAVE_FREQ=3000` 仍然会保存初始化模型。
 
 下例沿用双卡、每卡 batch 32（总 batch 64）、1 个 VLM token、3000 步和原学习率，
-从官方 v044 重新开始。训练输出统一写到 `/root/autodl-tmp/chkpt/2601-lerobot/vlm-only/`，
+从官方 v044 重新开始。训练输出统一写到 `/data1/wyn/chkpt/2601-lerobot/PromptVLA/`，
 使用独立 run 名称，并关闭编译。
 
 ```bash
-export FINETUNED_PRETRAINED_PATH=/root/autodl-fs/wyn/models/pi05_libero_finetuned_v044
-export TOKENIZER_PATH=/root/autodl-fs/wyn/models/google/paligemma-3b-pt-224
-export DATASET_ROOT=/root/autodl-fs/wyn/datasets/libero
-export OUTPUT_ROOT=/root/autodl-tmp/chkpt/2601-lerobot/vlm-only
-export LOG_ROOT=/root/autodl-tmp/logs/vlm-only
-export TMPDIR=/root/autodl-tmp/tmp
+export FINETUNED_PRETRAINED_PATH=/home/wyn/models/lerobot/pi05_libero_finetuned_v044
+export TOKENIZER_PATH=/home/wyn/models/paligemma-3b-pt-224
+export DATASET_ROOT=/home/wyn/datasets/libero
+export OUTPUT_ROOT=/data1/wyn/chkpt/2601-lerobot/PromptVLA
+export LOG_ROOT=/data1/wyn/chkpt/2601-lerobot/logs
+export TMPDIR="$OUTPUT_ROOT/.runtime/tmp"
 
 RUN_NAME=pi05-finetuned-vlm1-seed0-nocompile \
 SAVE_ONLY_FINAL=true GPU_IDS=0,1 BATCH_SIZE=32 VLM_PROMPT_TOKENS=1 FLOW_STEPS=3000 \
@@ -213,7 +214,7 @@ bash examples/training/train_pi05_vlm_only.sh finetuned 0 \
 
 # 同一终端，完成后测四个 suite（新终端先重新设置上面的路径变量）。
 RUN_NAME=pi05-finetuned-vlm1-seed0-nocompile \
-CKPT_ROOT="$OUTPUT_ROOT" BASE_OUTPUT=/root/autodl-tmp/eval/vlm-only \
+CKPT_ROOT="$OUTPUT_ROOT" BASE_OUTPUT=/data1/wyn/chkpt/2601-lerobot/PromptVLA/eval \
 GPU_ID=0 VLM_PROMPT_TOKENS=1 CHECKPOINT_STEP=3000 \
 bash run_eval_libero_vlm_only.sh finetuned trained all 0
 ```
@@ -258,7 +259,7 @@ GPU_ID=1 bash run_eval_libero_vlm_only.sh finetuned all all 0
 
 也可以 `GPU_ID=0 bash run_eval_libero_vlm_only.sh both all all 0` 单卡顺序测完两来源的六组条件。
 默认每个模型四套 LIBERO、每任务 10 次，共 400 episodes；环境 seed=1000，执行动作数=10。
-输出根目录：`/root/autodl-tmp/eval/vlm-only`，每个来源/run/condition 独立保存并支持原评测续跑。
+输出根目录：`/data1/wyn/chkpt/2601-lerobot/PromptVLA/eval`，每个来源/run/condition 独立保存并支持原评测续跑。
 修改 token 数后，评测也传入同一个 `VLM_PROMPT_TOKENS`；不会在评测时修改学习好的 prompt 大小。
 
 ```bash

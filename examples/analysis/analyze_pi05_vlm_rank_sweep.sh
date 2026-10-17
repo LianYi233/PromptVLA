@@ -13,9 +13,8 @@ Default: all 1; base VLM-only tokens 1 2 4 8 16 32, checkpoint 3000.
   all    eval -> align -> report. Stops on failure; completed eval/tasks and align/steps resume.
 
 Defaults: GPU_ID=0, SOURCE=base, VLM_PROMPT_TOKEN_COUNTS="1 2 4 8 16 32",
-CKPT_ROOT=/root/autodl-tmp/chkpt/2601-lerobot/vlm-only,
-BASE_OUTPUT=/root/autodl-tmp/eval/vlm-only,
-REPORT_ROOT=/root/autodl-tmp/analysis/vlm-only,
+CKPT_ROOT=/data1/wyn/chkpt/2601-lerobot/PromptVLA,
+BASE_OUTPUT=CKPT_ROOT/eval, REPORT_ROOT=CKPT_ROOT/analysis,
 ALIGNMENT_STEPS="0 1500 3000", CHECKPOINT_STEP=3000, EVAL_SEED=1000, EPISODES_PER_TASK=10.
 ALIGNMENT_NAME=prompt_alignment, HELDOUT_PROBES=4, HELDOUT_SEED=2027, RIDGE_RELATIVE=0.01.
 Set FONT_PATH for a specific figure font. RUN_PREFIX=pi05. SOURCE may also be finetuned.
@@ -45,12 +44,12 @@ for value in "${COUNTS[@]}"; do
   fi
   SEEN["$value"]=1
 done
-export CKPT_ROOT="${CKPT_ROOT:-/root/autodl-tmp/chkpt/2601-lerobot/vlm-only}"
-export BASE_OUTPUT="${BASE_OUTPUT:-/root/autodl-tmp/eval/vlm-only}"
+export CKPT_ROOT="${CKPT_ROOT:-/data1/wyn/chkpt/2601-lerobot/PromptVLA}"
+export BASE_OUTPUT="${BASE_OUTPUT:-$CKPT_ROOT/eval}"
 export GPU_ID="${GPU_ID:-0}" RUN_PREFIX="${RUN_PREFIX:-pi05}" CHECKPOINT_STEP="${CHECKPOINT_STEP:-3000}"
 export EVAL_SEED="${EVAL_SEED:-1000}" EPISODES_PER_TASK="${EPISODES_PER_TASK:-10}"
 export PYTHONPATH="$REPO_ROOT/src${PYTHONPATH:+:$PYTHONPATH}" PYTHONUNBUFFERED=1 TOKENIZERS_PARALLELISM=false
-REPORT_ROOT="${REPORT_ROOT:-/root/autodl-tmp/analysis/vlm-only}"
+REPORT_ROOT="${REPORT_ROOT:-$CKPT_ROOT/analysis}"
 OUTPUT="$REPORT_ROOT/${RUN_PREFIX}-${SOURCE}-seed${SEED}"
 ALIGNMENT_NAME="${ALIGNMENT_NAME:-prompt_alignment}"
 DRY_RUN="${DRY_RUN:-false}"

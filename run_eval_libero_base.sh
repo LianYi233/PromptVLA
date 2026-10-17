@@ -13,9 +13,9 @@ seed=1000, CUDA GPU 0, AMP/compile disabled, task-level resume and success summa
 GPU_ID=0 bash run_eval_libero_base.sh all
 DRY_RUN=true bash run_eval_libero_base.sh all
 
-BASE_MODEL_PATH defaults to PRETRAINED_PATH, or /root/autodl-tmp/models/pi05_libero_base
-TOKENIZER_PATH defaults to /root/autodl-tmp/models/google/paligemma-3b-pt-224
-BASE_OUTPUT defaults to /root/autodl-tmp/eval/prompt-learning/pi05-libero-base
+BASE_MODEL_PATH defaults to PRETRAINED_PATH / BASE_PRETRAINED_PATH, or /home/wyn/models/lerobot/pi05_libero_base
+TOKENIZER_PATH defaults to /home/wyn/models/paligemma-3b-pt-224
+BASE_OUTPUT defaults to CKPT_ROOT/eval (/data1/wyn/chkpt/2601-lerobot/PromptVLA/eval)
 Other overrides: GPU_ID, EPISODES_PER_TASK, LIBERO_CONFIG_PATH.
 Uses the base model's saved processors/statistics; only the tokenizer path is
 overridden at runtime. The checkpoint directory and its JSON files are not edited.
@@ -26,6 +26,6 @@ if (( $# > 1 )); then
   echo "Expected [all|no10|SUITE]; the base model has no training-run seed to select" >&2
   exit 2
 fi
-export BASE_MODEL_PATH="${BASE_MODEL_PATH:-${PRETRAINED_PATH:-/root/autodl-tmp/models/pi05_libero_base}}"
-export TOKENIZER_PATH="${TOKENIZER_PATH:-/root/autodl-tmp/models/google/paligemma-3b-pt-224}"
+export BASE_MODEL_PATH="${BASE_MODEL_PATH:-${PRETRAINED_PATH:-${BASE_PRETRAINED_PATH:-/home/wyn/models/lerobot/pi05_libero_base}}}"
+export TOKENIZER_PATH="${TOKENIZER_PATH:-/home/wyn/models/paligemma-3b-pt-224}"
 exec bash "$SCRIPT_DIR/run_eval_libero-full.sh" pi05_libero_base "${1:-all}" 0

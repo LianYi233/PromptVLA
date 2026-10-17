@@ -12,11 +12,11 @@ Only checkpoint 003000 is saved; no torch.compile. Other RNG uses fixed global s
 Names: pi05-pdet-base-vlm2-P1-D1-E1-T1 (RUN_PREFIX defaults to pi05-pdet).
 This independent-stream protocol does NOT replay historical global-seed noise/time draws.
 
-PROMPT_INIT_DIR=/root/autodl-fs/wyn/prompt-inits must contain:
+Set PROMPT_INIT_DIR to the local directory containing:
   pi05-base-vlm2-init-seed0.safetensors and pi05-base-vlm2-init-seed1.safetensors
 Both are checked against their provenance and must have different tensor hashes.
-Inputs default to /root/autodl-fs/wyn/{models,datasets}; checkpoints always default to
-/root/autodl-tmp/chkpt/2601-lerobot/vlm-only; logs to /root/autodl-tmp/logs/vlm-only.
+Inputs default to /home/wyn/{models,datasets}; checkpoints default to
+/data1/wyn/chkpt/2601-lerobot/PromptVLA; logs to /data1/wyn/chkpt/2601-lerobot/logs.
 No overwrites/skipping: after partial completion choose remaining PDET_CASES explicitly.
 DRY_RUN=true checks all inputs/outputs and prints commands without starting training.
 
@@ -46,15 +46,18 @@ DRY_RUN="${DRY_RUN:-false}"
 case "$DRY_RUN" in true|false) ;; *) echo "Invalid DRY_RUN" >&2; exit 2 ;; esac
 RUN_PREFIX="${RUN_PREFIX:-pi05-pdet}"
 if [[ ! "$RUN_PREFIX" =~ ^[a-zA-Z0-9_-]+$ ]]; then echo "Invalid RUN_PREFIX" >&2; exit 2; fi
-PROMPT_INIT_DIR="${PROMPT_INIT_DIR:-/root/autodl-fs/wyn/prompt-inits}"
+if [[ -z "${PROMPT_INIT_DIR:-}" ]]; then
+  echo "Set PROMPT_INIT_DIR to the local directory containing the exported seed0/seed1 prompts; see --help" >&2
+  exit 2
+fi
 export PYTHONPATH="$REPO_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 export GPU_IDS="${GPU_IDS:-0,1}" BATCH_SIZE="${BATCH_SIZE:-32}"
 export FLOW_STEPS=3000 SAVE_ONLY_FINAL=true
-export BASE_PRETRAINED_PATH="${BASE_PRETRAINED_PATH:-/root/autodl-fs/wyn/models/pi05_libero_base}"
-export TOKENIZER_PATH="${TOKENIZER_PATH:-/root/autodl-fs/wyn/models/google/paligemma-3b-pt-224}"
-export DATASET_ROOT="${DATASET_ROOT:-/root/autodl-fs/wyn/datasets/libero}"
-export OUTPUT_ROOT="${OUTPUT_ROOT:-/root/autodl-tmp/chkpt/2601-lerobot/vlm-only}"
-export LOG_ROOT="${LOG_ROOT:-/root/autodl-tmp/logs/vlm-only}"
+export BASE_PRETRAINED_PATH="${BASE_PRETRAINED_PATH:-/home/wyn/models/lerobot/pi05_libero_base}"
+export TOKENIZER_PATH="${TOKENIZER_PATH:-/home/wyn/models/paligemma-3b-pt-224}"
+export DATASET_ROOT="${DATASET_ROOT:-/home/wyn/datasets/libero}"
+export OUTPUT_ROOT="${OUTPUT_ROOT:-/data1/wyn/chkpt/2601-lerobot/PromptVLA}"
+export LOG_ROOT="${LOG_ROOT:-/data1/wyn/chkpt/2601-lerobot/logs}"
 EXTRA_ARGS=(--policy.compile_model=false
   --prompt_rank.freq="${RANK_FREQ:-250}" --prompt_rank.samples="${RANK_SAMPLES:-16}"
   --prompt_rank.output_probes="${RANK_OUTPUT_PROBES:-4}" --prompt_rank.seed="${RANK_SEED:-2026}"

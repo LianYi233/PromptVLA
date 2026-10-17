@@ -9,11 +9,17 @@ The default research path is native PI0.5 VLM-only prompt learning; inherited
 CABO/priming/bridge recipes are separate experiments, not its default method.
 Current training/evaluation entry points and paths are listed in the root README.
 Subsequent experiments run on a local server with four A100 GPUs, with the checkout
-at `/home/wyn/VLAA/PromptVLA`. Local paths for models, datasets, assets, prompt
-initializations and experiment outputs have not yet been supplied. Treat the
-AutoDL paths in existing scripts and documentation as historical defaults, not
-the current server's configuration. Do not infer resource paths or change the
-experiment's GPU count or global batch size merely because four GPUs are available.
+at `/home/wyn/VLAA/PromptVLA`. Source models are under `/home/wyn/models/lerobot/`
+(`pi05_libero_base` and `pi05_libero_finetuned_v044`), the tokenizer is at
+`/home/wyn/models/paligemma-3b-pt-224`, and the dataset is `/home/wyn/datasets/libero`.
+Save checkpoints under `/data1/wyn/chkpt/2601-lerobot/PromptVLA` and training logs
+under `/data1/wyn/chkpt/2601-lerobot/logs`. Evaluation results default to the
+checkpoint root's `eval/`; evaluation logs to the log root's `eval/`.
+Runtime temporary files/caches default to the output root's `.runtime/`.
+LIBERO assets and prompt initialization directories have not yet been supplied;
+PDET requires an explicit `PROMPT_INIT_DIR`. Do not infer these input paths.
+Treat AutoDL paths in legacy recipes as historical. Do not change the experiment's
+GPU count or global batch size merely because four GPUs are available.
 
 > **User-facing help → [`AGENT_GUIDE.md`](./AGENT_GUIDE.md)** (SO-101 setup, recording, picking a policy, training duration, eval — with copy-pasteable commands).
 

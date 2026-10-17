@@ -70,18 +70,18 @@ if [[ ! "$SEED" =~ ^(0|[1-9][0-9]*)$ ]]; then echo "Invalid SEED" >&2; exit 2; f
 DTYPE="${DTYPE:-bfloat16}"
 case "$DTYPE" in bfloat16) PRECISION=bf16 ;; float32) PRECISION=no ;; *) echo "Invalid DTYPE" >&2; exit 2 ;; esac
 if [[ "$SOURCE" == base ]]; then
-  PRETRAINED_PATH="${PRETRAINED_PATH:-${BASE_PRETRAINED_PATH:-/root/autodl-tmp/models/pi05_libero_base}}"
+  PRETRAINED_PATH="${PRETRAINED_PATH:-${BASE_PRETRAINED_PATH:-/home/wyn/models/lerobot/pi05_libero_base}}"
   PRESERVE=false
   NORM='{"VISUAL":"IDENTITY","STATE":"QUANTILES","ACTION":"QUANTILES"}'
 else
-  PRETRAINED_PATH="${PRETRAINED_PATH:-${FINETUNED_PRETRAINED_PATH:-/root/autodl-tmp/models/pi05_libero_finetuned_v044}}"
+  PRETRAINED_PATH="${PRETRAINED_PATH:-${FINETUNED_PRETRAINED_PATH:-/home/wyn/models/lerobot/pi05_libero_finetuned_v044}}"
   PRESERVE=true
   NORM='{"VISUAL":"IDENTITY","STATE":"MEAN_STD","ACTION":"MEAN_STD"}'
 fi
-DATASET_ROOT="${DATASET_ROOT:-/root/autodl-tmp/datasets/libero}"
-TOKENIZER_PATH="${TOKENIZER_PATH:-/root/autodl-tmp/models/google/paligemma-3b-pt-224}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-/root/autodl-tmp/chkpt/2601-lerobot/vlm-only}"
-LOG_ROOT="${LOG_ROOT:-/root/autodl-tmp/logs/vlm-only}"
+DATASET_ROOT="${DATASET_ROOT:-/home/wyn/datasets/libero}"
+TOKENIZER_PATH="${TOKENIZER_PATH:-/home/wyn/models/paligemma-3b-pt-224}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-/data1/wyn/chkpt/2601-lerobot/PromptVLA}"
+LOG_ROOT="${LOG_ROOT:-/data1/wyn/chkpt/2601-lerobot/logs}"
 RUN_NAME="${RUN_NAME:-pi05-${SOURCE}-vlm${VLM_PROMPT_TOKENS}-seed${SEED}}"
 OUTPUT_DIR="$OUTPUT_ROOT/$RUN_NAME"
 DRY_RUN="${DRY_RUN:-false}"
@@ -149,9 +149,9 @@ fi
 command -v accelerate >/dev/null
 TRAINER=$(command -v lerobot-train)
 mkdir -p "$OUTPUT_ROOT" "$LOG_ROOT"
-export TMPDIR="${TMPDIR:-/root/autodl-tmp/tmp}"
-export TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-/root/autodl-tmp/cache/torchinductor/$RUN_NAME}"
-export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-/root/autodl-tmp/cache/triton/$RUN_NAME}"
+export TMPDIR="${TMPDIR:-$OUTPUT_ROOT/.runtime/tmp}"
+export TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-$OUTPUT_ROOT/.runtime/cache/torchinductor/$RUN_NAME}"
+export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-$OUTPUT_ROOT/.runtime/cache/triton/$RUN_NAME}"
 mkdir -p "$TMPDIR" "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR"
 export PYTHONUNBUFFERED=1 TOKENIZERS_PARALLELISM=false
 CUDA_VISIBLE_DEVICES="$GPU_IDS" accelerate "${LAUNCH_ARGS[@]}" "$TRAINER" \

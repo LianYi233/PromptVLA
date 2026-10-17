@@ -13,9 +13,9 @@ Only VLM prompts train; action prompts=0, backbone frozen. torch.compile is off 
 Always train 3000 steps and save only 003000 (no initial or intermediate checkpoints).
 W&B defaults to online / prompt-learning, with checkpoint artifacts disabled.
 
-Input models, tokenizer and dataset default to /root/autodl-fs/wyn/.
-OUTPUT_ROOT defaults to /root/autodl-tmp/chkpt/2601-lerobot/vlm-only
-LOG_ROOT defaults to /root/autodl-tmp/logs/vlm-only
+Input models/tokenizer default to /home/wyn/models; dataset to /home/wyn/datasets/libero.
+OUTPUT_ROOT defaults to /data1/wyn/chkpt/2601-lerobot/PromptVLA
+LOG_ROOT defaults to /data1/wyn/chkpt/2601-lerobot/logs
 Run names: pi05-{base|finetuned}-vlm{COUNT}-seed{SEED}; RUN_PREFIX changes pi05.
 Use BASE_PRETRAINED_PATH / FINETUNED_PRETRAINED_PATH / DATASET_ROOT / TOKENIZER_PATH
 to override inputs. GPU_IDS, BATCH_SIZE, MAIN_PROCESS_PORT and DRY_RUN are supported.
@@ -63,12 +63,12 @@ if [[ "$DRY_RUN" != true && "$DRY_RUN" != false ]]; then echo "Invalid DRY_RUN" 
 RUN_PREFIX="${RUN_PREFIX:-pi05}"
 export GPU_IDS="${GPU_IDS:-0,1}" BATCH_SIZE="${BATCH_SIZE:-32}"
 export FLOW_STEPS=3000 SAVE_ONLY_FINAL=true
-export BASE_PRETRAINED_PATH="${BASE_PRETRAINED_PATH:-/root/autodl-fs/wyn/models/pi05_libero_base}"
-export FINETUNED_PRETRAINED_PATH="${FINETUNED_PRETRAINED_PATH:-/root/autodl-fs/wyn/models/pi05_libero_finetuned_v044}"
-export TOKENIZER_PATH="${TOKENIZER_PATH:-/root/autodl-fs/wyn/models/google/paligemma-3b-pt-224}"
-export DATASET_ROOT="${DATASET_ROOT:-/root/autodl-fs/wyn/datasets/libero}"
-export OUTPUT_ROOT="${OUTPUT_ROOT:-/root/autodl-tmp/chkpt/2601-lerobot/vlm-only}"
-export LOG_ROOT="${LOG_ROOT:-/root/autodl-tmp/logs/vlm-only}"
+export BASE_PRETRAINED_PATH="${BASE_PRETRAINED_PATH:-/home/wyn/models/lerobot/pi05_libero_base}"
+export FINETUNED_PRETRAINED_PATH="${FINETUNED_PRETRAINED_PATH:-/home/wyn/models/lerobot/pi05_libero_finetuned_v044}"
+export TOKENIZER_PATH="${TOKENIZER_PATH:-/home/wyn/models/paligemma-3b-pt-224}"
+export DATASET_ROOT="${DATASET_ROOT:-/home/wyn/datasets/libero}"
+export OUTPUT_ROOT="${OUTPUT_ROOT:-/data1/wyn/chkpt/2601-lerobot/PromptVLA}"
+export LOG_ROOT="${LOG_ROOT:-/data1/wyn/chkpt/2601-lerobot/logs}"
 EXTRA_ARGS=(--policy.compile_model=false "$@")
 
 run_one() {

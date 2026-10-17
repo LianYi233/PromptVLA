@@ -243,7 +243,7 @@ def analyze(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--ckpt-root", type=Path, default=Path("/root/autodl-tmp/chkpt/2601-lerobot/vlm-only")
+        "--ckpt-root", type=Path, default=Path("/data1/wyn/chkpt/2601-lerobot/PromptVLA")
     )
     parser.add_argument("--tokens", type=int, nargs="+", default=[1, 2, 4, 8, 16, 32])
     parser.add_argument("--seed", type=int, default=1)

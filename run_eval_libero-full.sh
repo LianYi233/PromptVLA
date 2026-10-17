@@ -10,8 +10,10 @@ usage() {
   echo "VARIANT: full_reference, no_bridge, direct_dual, dual_prompt_only, vlm_only, action_only, no_cabo, pi05_libero_base"
   echo "Defaults: all suites, training seed 0, checkpoint 3000, 10 episodes/task."
   echo "VLM_PROMPT_TOKENS=8 bash $0 vlm_only all 0  # token-sweep checkpoint"
-  echo "With VLM_PROMPT_TOKENS, use pi05-vlm_only-vlmN-seedS in the prompt-learning/vlm-token-sweep root."
+  echo "With VLM_PROMPT_TOKENS, legacy run names are pi05-vlm_only-vlmN-seedS; set CKPT_ROOT for legacy outputs."
+  echo "For native VLM-only runs use run_eval_libero_vlm_only.sh or run_eval_libero_vlm_only_token_sweep.sh."
   echo "Overrides: CKPT_ROOT, BASE_CKPT, BASE_OUTPUT, RUN_NAME, CHECKPOINT_STEP (0 allowed), EPISODES_PER_TASK, GPU_ID, EVAL_SEED."
+  echo "Results default to CKPT_ROOT/eval; logs to EVAL_LOG_ROOT (default LOG_ROOT/eval)."
   echo "DRY_RUN=true validates paths/token counts and prints commands without loading a model."
   echo "Evaluate all 1/2/8/16-token models: bash run_eval_libero_vlm_token_sweep.sh all 0"
   echo "Evaluate the base with BOTH prompt banks disabled: bash run_eval_libero_base.sh all"
@@ -59,8 +61,7 @@ if [[ "$DRY_RUN" != true && "$DRY_RUN" != false ]]; then
 fi
 DEFAULT_RUN_NAME="pi05-${VARIANT}-seed${SEED}"
 TRAINING_SEED_LABEL="$SEED"
-DEFAULT_CKPT_ROOT=/root/autodl-tmp/chkpt/2601-lerobot/prompt-ablation
-DEFAULT_BASE_OUTPUT=/root/autodl-tmp/eval/2601-lerobot
+DEFAULT_CKPT_ROOT=/data1/wyn/chkpt/2601-lerobot/PromptVLA
 export LEROBOT_EVAL_BASE=0
 if [[ "$VARIANT" == pi05_libero_base ]]; then
   if [[ -n "${BASE_CKPT:-}" || -n "$VLM_PROMPT_TOKENS" ]]; then
@@ -69,8 +70,8 @@ if [[ "$VARIANT" == pi05_libero_base ]]; then
   fi
   DEFAULT_RUN_NAME=pi05_libero_base-no_prompt
   TRAINING_SEED_LABEL=none
-  DEFAULT_BASE_OUTPUT=/root/autodl-tmp/eval/prompt-learning/pi05-libero-base
-  BASE_MODEL_PATH="${BASE_MODEL_PATH:-${PRETRAINED_PATH:-/root/autodl-tmp/models/pi05_libero_base}}"
+  BASE_MODEL_PATH="${BASE_MODEL_PATH:-${PRETRAINED_PATH:-${BASE_PRETRAINED_PATH:-/home/wyn/models/lerobot/pi05_libero_base}}}"
+  export TOKENIZER_PATH="${TOKENIZER_PATH:-/home/wyn/models/paligemma-3b-pt-224}"
   export LEROBOT_EVAL_BASE=1
   export PYTHONPATH="$SCRIPT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 fi
@@ -80,8 +81,6 @@ if [[ -n "$VLM_PROMPT_TOKENS" ]]; then
     exit 2
   fi
   DEFAULT_RUN_NAME="pi05-vlm_only-vlm${VLM_PROMPT_TOKENS}-seed${SEED}"
-  DEFAULT_CKPT_ROOT=/root/autodl-tmp/chkpt/2601-lerobot/prompt-learning/vlm-token-sweep
-  DEFAULT_BASE_OUTPUT=/root/autodl-tmp/eval/prompt-learning/vlm-token-sweep
 fi
 RUN_NAME="${RUN_NAME:-${DEFAULT_RUN_NAME}}"
 case "$MODE" in
@@ -116,14 +115,15 @@ export PYTHONUNBUFFERED=1
 CKPT_ROOT="${CKPT_ROOT:-${DEFAULT_CKPT_ROOT}}"
 # Explicit BASE_CKPT overrides automatic checkpoint discovery only.
 BASE_CKPT="${BASE_CKPT:-${CKPT_ROOT}/${RUN_NAME}/checkpoints}"
-BASE_OUTPUT="${BASE_OUTPUT:-${DEFAULT_BASE_OUTPUT}}"
+BASE_OUTPUT="${BASE_OUTPUT:-$CKPT_ROOT/eval}"
+EVAL_LOG_ROOT="${EVAL_LOG_ROOT:-${LOG_ROOT:-/data1/wyn/chkpt/2601-lerobot/logs}/eval}"
 STEPS=("$CHECKPOINT_STEP")
 if [[ "$VARIANT" == pi05_libero_base ]]; then
   STEPS=(base)
 fi
-SUMMARY_LOG="$BASE_OUTPUT/eval_${RUN_NAME}-${SUITE_TAG}-summary.log"
+SUMMARY_LOG="$EVAL_LOG_ROOT/eval_${RUN_NAME}-${SUITE_TAG}-summary.log"
 if [[ "$DRY_RUN" != true ]]; then
-  mkdir -p "$BASE_OUTPUT"
+  mkdir -p "$BASE_OUTPUT" "$EVAL_LOG_ROOT"
   touch "$SUMMARY_LOG"
 fi
 FINAL_EXIT=0
@@ -137,7 +137,7 @@ for STEP in "${STEPS[@]}"; do
     CKPT="$BASE_CKPT/$STEP_PADDED/pretrained_model"
   fi
   OUTPUT_DIR="$BASE_OUTPUT/libero060-all-${RUN_NAME}-${STEP_PADDED}-${SUITE_TAG}-resume"
-  LOG="$BASE_OUTPUT/eval_${RUN_NAME}-${STEP_PADDED}-${SUITE_TAG}.log"
+  LOG="$EVAL_LOG_ROOT/eval_${RUN_NAME}-${STEP_PADDED}-${SUITE_TAG}.log"
 
   if [[ ! -d "$CKPT" ]]; then
     echo "ERROR: checkpoint not found: $CKPT" >&2
