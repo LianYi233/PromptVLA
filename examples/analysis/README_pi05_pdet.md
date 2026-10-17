@@ -35,14 +35,26 @@ P1 不保证坏，P0 不保证好；两者是初始化身份标签，实际张�
 训练 3000 steps，仅保存最终完整 checkpoint `003000`，关闭 torch.compile。
 同时保留 step 0、每 250 步和最终步的小型 prompt/有效秩/NTK 记录。
 
-先确认这些文件都在（不需要旧服务器的完整训练模型）：
+本轮在本地 A100 服务器重新生成 P0/P1，作为一对新的初始化；不假定它们与旧服务器相同。
+先在已配置的 lerobot 环境执行（仅导出 token=2 初值，零训练更新）：
 
-```text
-/path/to/prompt-inits/pi05-base-vlm2-init-seed0.safetensors
-/path/to/prompt-inits/pi05-base-vlm2-init-seed1.safetensors
+```bash
+cd /home/wyn/VLAA/PromptVLA
+bash examples/setup/prepare_promptvla_local.sh assets
+GPU_IDS=0,1 BATCH_SIZE=32 bash examples/setup/prepare_promptvla_local.sh inits
 ```
 
-在本地 A100 服务器运行（把 `/path/to/prompt-inits` 替换为两个初始化文件实际所在的目录）：
+资源下载到 `/data1/datasets/libero-assets` 并配置到当前 LIBERO 安装。
+初始化导出需要加载完整模型，但不创建优化器、探针或完整 checkpoint，不启动 W&B。
+已有初始化文件不会覆盖；若只有 seed0 导出成功，使用 `INIT_SEEDS=1` 补齐 seed1。
+确认以下两个文件存在（不需要旧服务器的完整训练模型）：
+
+```text
+/data1/wyn/prompt-work/pi05-base-vlm2-init-seed0.safetensors
+/data1/wyn/prompt-work/pi05-base-vlm2-init-seed1.safetensors
+```
+
+之后在同一环境运行本地 P/D/E/T 训练：
 
 ```bash
 cd /home/wyn/VLAA/PromptVLA
@@ -52,7 +64,7 @@ env -u PRETRAINED_PATH -u RUN_NAME -u VLM_PROMPT_TOKENS \
     -u PROMPT_INIT_PATH -u PROMPT_EXPORT_PATH -u PROMPT_EXPORT_REFERENCE \
 OUTPUT_ROOT=/data1/wyn/chkpt/2601-lerobot/PromptVLA \
 LOG_ROOT=/data1/wyn/chkpt/2601-lerobot/logs \
-PROMPT_INIT_DIR=/path/to/prompt-inits \
+PROMPT_INIT_DIR=/data1/wyn/prompt-work \
 RUN_PREFIX=pi05-pdet GPU_IDS=0,1 BATCH_SIZE=32 \
 PDET_CASES="1111 0000 0111 1011 1101 1110 1000" \
 RANK_FREQ=250 RANK_SAMPLES=16 RANK_OUTPUT_PROBES=4 \
@@ -67,7 +79,7 @@ bash examples/training/train_pi05_vlm_only_pdet_sweep.sh \
 已有目录不会覆盖或自动跳过，中断后明确选择剩余 case；新一轮可改 RUN_PREFIX。
 输入模型/tokenizer 默认在 `/home/wyn/models/`，数据集在 `/home/wyn/datasets/libero`。
 模型输出默认在 `/data1/wyn/chkpt/2601-lerobot/PromptVLA`，日志在 `/data1/wyn/chkpt/2601-lerobot/logs`。
-`PROMPT_INIT_DIR` 必须显式设置；LIBERO assets 路径需在测试前配置。
+`PROMPT_INIT_DIR` 默认 `/data1/wyn/prompt-work`；七组实验统一使用准备步骤导出的同一对初值。
 
 ## 检查隔离是否有效
 

@@ -16,8 +16,11 @@ Save checkpoints under `/data1/wyn/chkpt/2601-lerobot/PromptVLA` and training lo
 under `/data1/wyn/chkpt/2601-lerobot/logs`. Evaluation results default to the
 checkpoint root's `eval/`; evaluation logs to the log root's `eval/`.
 Runtime temporary files/caches default to the output root's `.runtime/`.
-LIBERO assets and prompt initialization directories have not yet been supplied;
-PDET requires an explicit `PROMPT_INIT_DIR`. Do not infer these input paths.
+LIBERO assets live at `/data1/datasets/libero-assets`; prompt initialization files
+live at `/data1/wyn/prompt-work` (`PROMPT_INIT_DIR`). The local setup script downloads
+assets/configures the installed package and exports fresh token=2 seed0/seed1 prompts
+through normal model construction, without training updates. Treat these as new
+local initializations, not verified reproductions of historical server tensors.
 Treat AutoDL paths in legacy recipes as historical. Do not change the experiment's
 GPU count or global batch size merely because four GPUs are available.
 

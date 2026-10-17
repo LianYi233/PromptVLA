@@ -71,6 +71,8 @@ variables still override them; unset stale AutoDL overrides in an existing shell
 | Finetuned model | `FINETUNED_PRETRAINED_PATH=/home/wyn/models/lerobot/pi05_libero_finetuned_v044` |
 | Tokenizer | `TOKENIZER_PATH=/home/wyn/models/paligemma-3b-pt-224` |
 | LIBERO dataset | `DATASET_ROOT=/home/wyn/datasets/libero` |
+| LIBERO assets | `LIBERO_ASSETS_PATH=/data1/datasets/libero-assets` (setup script) |
+| Exported prompt initializations | `PROMPT_INIT_DIR=/data1/wyn/prompt-work` |
 | Checkpoints (training / evaluation) | `OUTPUT_ROOT` / `CKPT_ROOT`: `/data1/wyn/chkpt/2601-lerobot/PromptVLA` |
 | Training logs | `LOG_ROOT=/data1/wyn/chkpt/2601-lerobot/logs` |
 | Evaluation logs | `EVAL_LOG_ROOT`: `$LOG_ROOT/eval` |
@@ -78,12 +80,30 @@ variables still override them; unset stale AutoDL overrides in an existing shell
 | Temporary files | `TMPDIR`: `$OUTPUT_ROOT/.runtime/tmp` |
 | Compiler caches | `TORCHINDUCTOR_CACHE_DIR` / `TRITON_CACHE_DIR`: `$OUTPUT_ROOT/.runtime/cache/{torchinductor,triton}/$RUN_NAME` |
 
-LIBERO assets and exported prompt initialization locations are still to be supplied.
-Configure LIBERO's local asset paths (including any package asset symlinks) before
-evaluation. `LIBERO_CONFIG_PATH` defaults to `/home/wyn/.libero`; that directory alone
-does not configure the assets. P/D/E/T training requires an explicit `PROMPT_INIT_DIR`
-containing the exported seed0/seed1 files and stops before training if it is unset.
-Ordinary VLM-only training does not require those files.
+Prepare assets and fresh local token=2 initializations in the configured environment:
+
+```bash
+conda activate lerobot
+cd /home/wyn/VLAA/PromptVLA
+bash examples/setup/prepare_promptvla_local.sh assets
+GPU_IDS=0,1 BATCH_SIZE=32 bash examples/setup/prepare_promptvla_local.sh inits
+```
+
+The asset step downloads the complete [LeRobot LIBERO assets](https://huggingface.co/datasets/lerobot/libero-assets)
+with one worker, validates key resources, links the active installation's `assets`,
+and updates `LIBERO_CONFIG_PATH/config.yaml` (default `/home/wyn/.libero`). Existing
+asset locations/configs are backed up. Re-run after a download interruption; use
+`python -m lerobot.scripts.setup_libero_assets --skip-download` to configure an
+already downloaded directory offline. This is a resource check, not a simulator test.
+
+The initialization step follows normal base-model construction for seeds 0 and 1
+and exports `pi05-base-vlm2-init-seed{0,1}.safetensors`. It loads the full model but
+performs zero updates, creates no optimizer/probes/full checkpoint, and disables
+W&B. The files contain prompt hashes and construction provenance. These are **new
+local initializations**, not verified reconstructions of the historical server's
+prompts. Use the same pair throughout the new P/D/E/T experiment.
+Existing files are never overwritten; after a partial export select the missing
+seed with `INIT_SEEDS=1 ... inits`. Ordinary VLM-only training does not require these files.
 
 The availability of four GPUs does not change the experiment recipe automatically;
 the token/rank/PDET sweeps still default to two GPUs and batch 32 per GPU. Keep
@@ -98,6 +118,7 @@ W&B continues to use the `prompt-learning` project for comparison with existing 
 
 | Experiment | Entry point |
 | --- | --- |
+| Download/configure assets and export local seed0/seed1 prompts | `examples/setup/prepare_promptvla_local.sh` |
 | Single VLM-only run | `examples/training/train_pi05_vlm_only.sh` |
 | Token sweep, base / finetuned | `examples/training/train_pi05_vlm_only_token_sweep.sh` |
 | Effective-rank / NTK monitoring | `examples/training/train_pi05_vlm_only_rank_sweep.sh` |

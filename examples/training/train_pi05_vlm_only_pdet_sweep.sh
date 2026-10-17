@@ -12,7 +12,7 @@ Only checkpoint 003000 is saved; no torch.compile. Other RNG uses fixed global s
 Names: pi05-pdet-base-vlm2-P1-D1-E1-T1 (RUN_PREFIX defaults to pi05-pdet).
 This independent-stream protocol does NOT replay historical global-seed noise/time draws.
 
-Set PROMPT_INIT_DIR to the local directory containing:
+PROMPT_INIT_DIR defaults to /data1/wyn/prompt-work and must contain:
   pi05-base-vlm2-init-seed0.safetensors and pi05-base-vlm2-init-seed1.safetensors
 Both are checked against their provenance and must have different tensor hashes.
 Inputs default to /home/wyn/{models,datasets}; checkpoints default to
@@ -46,10 +46,7 @@ DRY_RUN="${DRY_RUN:-false}"
 case "$DRY_RUN" in true|false) ;; *) echo "Invalid DRY_RUN" >&2; exit 2 ;; esac
 RUN_PREFIX="${RUN_PREFIX:-pi05-pdet}"
 if [[ ! "$RUN_PREFIX" =~ ^[a-zA-Z0-9_-]+$ ]]; then echo "Invalid RUN_PREFIX" >&2; exit 2; fi
-if [[ -z "${PROMPT_INIT_DIR:-}" ]]; then
-  echo "Set PROMPT_INIT_DIR to the local directory containing the exported seed0/seed1 prompts; see --help" >&2
-  exit 2
-fi
+PROMPT_INIT_DIR="${PROMPT_INIT_DIR:-/data1/wyn/prompt-work}"
 export PYTHONPATH="$REPO_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
 export GPU_IDS="${GPU_IDS:-0,1}" BATCH_SIZE="${BATCH_SIZE:-32}"
 export FLOW_STEPS=3000 SAVE_ONLY_FINAL=true
