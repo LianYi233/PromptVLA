@@ -33,7 +33,7 @@ VLM prompt 读取 observations 和自己的 prompt 块，action tokens 读取完
 
 ```bash
 cd /root
-git clone https://github.com/LianYi233/PromptVLA.git
+GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/LianYi233/PromptVLA.git
 cd PromptVLA
 conda activate lerobot
 python -m pip install --no-deps -e .

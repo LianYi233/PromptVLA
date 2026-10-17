@@ -31,7 +31,7 @@ checkout into the active environment before running it.
 
 ```bash
 cd /root
-git clone https://github.com/LianYi233/PromptVLA.git
+GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/LianYi233/PromptVLA.git
 cd PromptVLA
 conda activate lerobot
 python -m pip install --no-deps -e .
@@ -44,6 +44,11 @@ software stack. Complete any running experiments in the old checkout before
 switching the environment's editable install. A fresh environment needs the
 dependencies described in the [upstream setup guide](README_LEROBOT.md) and the
 LIBERO evaluation dependencies.
+
+The clone command skips inherited Git LFS test fixtures. Their pointers are
+preserved in this snapshot; the LFS object store was not copied. These fixtures
+are not used by the PI0.5/LIBERO experiment scripts, which load the external
+models, datasets, and assets listed below.
 
 | Resource | Current location |
 | --- | --- |
