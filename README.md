@@ -27,18 +27,28 @@ names remain `lerobot`, `lerobot-train`, and `lerobot-eval` so existing checkpoi
 processor configurations, and experiment scripts remain compatible. Install this
 checkout into the active environment before running it.
 
-## Existing AutoDL environment
+## Local server with four A100 GPUs
+
+Current experiments run on a local server with four A100 GPUs. The checkout lives
+at `/home/wyn/VLAA/PromptVLA`:
 
 ```bash
-cd /root
+mkdir -p /home/wyn/VLAA
+cd /home/wyn/VLAA
 GIT_LFS_SKIP_SMUDGE=1 git clone https://github.com/LianYi233/PromptVLA.git
-cd PromptVLA
+cd /home/wyn/VLAA/PromptVLA
+```
+
+If the server already has a configured `lerobot` environment, install this checkout
+into it:
+
+```bash
 conda activate lerobot
 python -m pip install --no-deps -e .
 python -c 'import lerobot; print(lerobot.__file__)'
 ```
 
-The printed package path should be under `/root/PromptVLA/src/lerobot/`.
+The printed package path should be under `/home/wyn/VLAA/PromptVLA/src/lerobot/`.
 `--no-deps` reuses the working environment and avoids changing the experimental
 software stack. Complete any running experiments in the old checkout before
 switching the environment's editable install. A fresh environment needs the
@@ -48,9 +58,18 @@ LIBERO evaluation dependencies.
 The clone command skips inherited Git LFS test fixtures. Their pointers are
 preserved in this snapshot; the LFS object store was not copied. These fixtures
 are not used by the PI0.5/LIBERO experiment scripts, which load the external
-models, datasets, and assets listed below.
+models, datasets, and assets.
 
-| Resource | Current location |
+Local paths for pretrained models, the tokenizer, datasets, LIBERO assets, prompt
+initializations, checkpoints, and logs have not yet been configured. Set the
+scripts' resource and output path overrides to the actual local locations before
+training or evaluation. The scripts still contain historical AutoDL defaults.
+The availability of four GPUs does not change the experiment recipe automatically;
+preserve the intended global batch size when choosing how many GPUs each run uses.
+
+### Previous AutoDL paths (reference only)
+
+| Resource | Historical location |
 | --- | --- |
 | Base model | `/root/autodl-fs/wyn/models/pi05_libero_base` |
 | Finetuned model | `/root/autodl-fs/wyn/models/pi05_libero_finetuned_v044` |

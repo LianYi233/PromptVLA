@@ -8,9 +8,12 @@ changes here. The Python package remains `lerobot` for checkpoint compatibility.
 The default research path is native PI0.5 VLM-only prompt learning; inherited
 CABO/priming/bridge recipes are separate experiments, not its default method.
 Current training/evaluation entry points and paths are listed in the root README.
-Keep full checkpoints under `/root/autodl-tmp/chkpt/2601-lerobot/vlm-only` unless
-the user explicitly chooses another location. Models, datasets, assets and prompt
-initialization files may remain under `/root/autodl-fs/wyn/`.
+Subsequent experiments run on a local server with four A100 GPUs, with the checkout
+at `/home/wyn/VLAA/PromptVLA`. Local paths for models, datasets, assets, prompt
+initializations and experiment outputs have not yet been supplied. Treat the
+AutoDL paths in existing scripts and documentation as historical defaults, not
+the current server's configuration. Do not infer resource paths or change the
+experiment's GPU count or global batch size merely because four GPUs are available.
 
 > **User-facing help → [`AGENT_GUIDE.md`](./AGENT_GUIDE.md)** (SO-101 setup, recording, picking a policy, training duration, eval — with copy-pasteable commands).
 
