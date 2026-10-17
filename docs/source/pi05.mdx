@@ -1,0 +1,333 @@
+# π₀.₅ (Pi05) Policy
+
+π₀.₅ is a **Vision-Language-Action model with open-world generalization**, from Physical Intelligence. The LeRobot implementation is adapted from their open source [OpenPI](https://github.com/Physical-Intelligence/openpi) repository.
+
+## Model Overview
+
+π₀.₅ represents a significant evolution from π₀, developed by [Physical Intelligence](https://www.physicalintelligence.company/blog/pi05) to address a big challenge in robotics: **open-world generalization**. While robots can perform impressive tasks in controlled environments, π₀.₅ is designed to generalize to entirely new environments and situations that were never seen during training.
+
+### The Generalization Challenge
+
+As Physical Intelligence explains, the fundamental challenge isn't performing tasks of agility or dexterity, but generalization, the ability to correctly perform tasks in new settings with new objects. Consider a robot cleaning different homes: each home has different objects in different places. Generalization must occur at multiple levels:
+
+- **Physical Level**: Understanding how to pick up a spoon (by the handle) or plate (by the edge), even with unseen objects in cluttered environments
+- **Semantic Level**: Understanding task semantics, where to put clothes and shoes (laundry hamper, not on the bed), and what tools are appropriate for cleaning spills
+- **Environmental Level**: Adapting to "messy" real-world environments like homes, grocery stores, offices, and hospitals
+
+### Co-Training on Heterogeneous Data
+
+The breakthrough innovation in π₀.₅ is **co-training on heterogeneous data sources**. The model learns from:
+
+1. **Multimodal Web Data**: Image captioning, visual question answering, object detection
+2. **Verbal Instructions**: Humans coaching robots through complex tasks step-by-step
+3. **Subtask Commands**: High-level semantic behavior labels (e.g., "pick up the pillow" for an unmade bed)
+4. **Cross-Embodiment Robot Data**: Data from various robot platforms with different capabilities
+5. **Multi-Environment Data**: Static robots deployed across many different homes
+6. **Mobile Manipulation Data**: ~400 hours of mobile robot demonstrations
+
+This diverse training mixture creates a "curriculum" that enables generalization across physical, visual, and semantic levels simultaneously.
+
+## Installation Requirements
+
+1. Install LeRobot by following our [Installation Guide](./installation).
+2. Install Pi0.5 dependencies by running:
+
+   ```bash
+   pip install -e ".[pi]"
+   ```
+
+## Usage
+
+To use π₀.₅ in your LeRobot configuration, specify the policy type as:
+
+```python
+policy.type=pi05
+```
+
+## Training
+
+### Prompt-only training with frozen backbones
+
+This repository's π₀.₅ variant uses two trainable prompt banks:
+`[VLM observation/language tokens] [VLM prompt tokens] [expert prompt tokens] [action tokens]`.
+The default is 16 VLM prompts (`num_vlm_prompt_tokens=16`) and 16 expert prompts
+(`num_prompt_tokens=16`), initialized from a normal distribution with standard deviation `0.02`.
+Each bank uses its backbone's embedding width. With the default `gemma_2b` VLM and `gemma_300m`
+expert, these are `16 × 2048 = 32,768` VLM parameters and `16 × 1024 = 16,384` expert parameters,
+for **49,152 trainable parameters** in total.
+
+The attention mask uses the following visibility rules. Rows are queries and columns are keys;
+`1` allows attention and `0` blocks it, subject to token padding masks.
+
+| Query block | Observation/language | VLM prompts | Expert prompts | Actions |
+| --- | --- | --- | --- | --- |
+| Observation/language | 1 | 0 | 0 | 0 |
+| VLM prompts | 1 | 1 | 0 | 0 |
+| Expert prompts | 0 | 0 | 1 | 1 |
+| Actions | 1 | 1 | 1 | 1 |
+
+Observation/language tokens attend only to their own block. VLM prompts attend to
+observation/language tokens and all VLM prompts; expert prompts attend to all expert prompts and
+action tokens. Both prompt banks retain self-attention and bidirectional attention within their
+own bank, but neither attends directly to the other prompt bank. Expert prompts do not attend
+directly to observation/language tokens. Action tokens attend to all four blocks, with bidirectional
+attention across the action chunk. During action-only Stage 1, the VLM prefix, including VLM
+prompts, is absent; expert prompts still attend to their own bank and the action block, and only
+expert prompts receive gradients. During inference, VLM prompts remain independent
+of actions and are cached with the VLM prefix. Expert prompts read the current noisy action tokens
+and are recomputed at every denoising step. Prompt outputs are not returned as actions, so the
+action chunk length is unchanged.
+
+The complete VLM, action expert, input/output projections, and timestep MLP remain frozen throughout
+action inpainting, the observation-conditioned bridge, and formal flow training. Only the two prompt
+banks are trainable. Gradients still propagate through the frozen backbones to their prompt inputs.
+Both `freeze_vision_encoder` and `train_expert_only` are enforced as `true`, including when loading
+older configurations that set them to `false`.
+
+Set `cabo_enabled=false` and either prompt count to `0` to disable that bank. CABO requires both
+banks to be nonempty. Training requires at least one nonempty bank;
+action-only inpainting requires `num_prompt_tokens > 0`. Set `next_action_pretrain_steps=0` for
+VLM-prompt-only flow training. With CABO disabled, both counts may be `0` when loading a model for
+inference or an ablation without prompts.
+
+### Training performance
+
+Fresh configurations default to `attention_implementation="sdpa"` and
+`separate_frozen_observations=true`. SDPA lets PyTorch select an attention kernel for the current
+device and precision. During the bridge and Stage 2, each layer computes observation/language
+tokens under `no_grad` and supplies their constant keys and values to the prompt/action computation,
+subject to the same attention mask. Gradients to both prompt banks, including VLM prompts, remain
+connected. When gradient checkpointing is enabled, this path checkpoints the prompt/action
+computation once per layer; it does not recompute the frozen observation branch during backward.
+Cached inference also uses the configured attention backend.
+
+Precision still defaults to `dtype="float32"`, with full FP32 semantics preserved. BF16 remains
+an explicit option via `--policy.dtype=bfloat16`; compilation remains off by default
+(`compile_model=false`). For a comparison with the joint eager implementation, add
+`--policy.attention_implementation=eager --policy.separate_frozen_observations=false` to the same
+training command, keeping precision and batch size fixed. Actual throughput depends on the hardware
+and sequence lengths.
+
+### Training Command Example
+
+Here's a complete training command for finetuning the base π₀.₅ model on your own dataset:
+
+```bash
+lerobot-train \
+    --dataset.repo_id=your_dataset \
+    --policy.type=pi05 \
+    --output_dir=./outputs/pi05_training \
+    --job_name=pi05_training \
+    --policy.repo_id=your_repo_id \
+    --policy.pretrained_path=lerobot/pi05_base \
+    --policy.compile_model=true \
+    --policy.gradient_checkpointing=true \
+    --wandb.enable=true \
+    --policy.dtype=bfloat16 \
+    --policy.num_vlm_prompt_tokens=16 \
+    --policy.num_prompt_tokens=16 \
+    --policy.cabo_enabled=true \
+    --policy.cabo_prompt_update_ratio=2.0 \
+    --policy.freeze_vision_encoder=true \
+    --policy.train_expert_only=true \
+    --steps=3000 \
+    --policy.device=cuda \
+    --batch_size=32
+```
+
+By default, a fresh flow run first performs a 1,000-update Stage 1, then performs the requested
+`--steps` observation-conditioned Stage 2 updates. The first 750 Stage 1 updates use action-only
+flow inpainting. For a complete 50-action chunk, they randomly mask 40 valid positions without
+replacement, keep 10 clean actions as bidirectional context, and predict flow velocity only at the
+masked positions. If a padded chunk has fewer than 40 valid positions, all of its valid positions are
+masked. The final 250 Stage 1 updates form a bridge to Stage 2: they use the same
+observation-conditioned full-flow loss as Stage 2. The action-only phase updates expert prompts;
+the bridge updates both VLM and expert prompts. All backbone and projection parameters remain
+frozen. Both objectives share one uninterrupted optimizer and learning-rate schedule. The legacy
+inpainting role embedding remains frozen, and no temporary prediction head is created or discarded.
+
+After Stage 1, Stage 2 rebuilds the policy and optimizer with the formal flow configuration, keeps
+both backbones and projections frozen, and continues training both prompt banks from their Stage 1
+weights. The three phases and their objectives are unchanged; only their updated parameters change.
+CABO controls the relative learning updates of the two prompt banks during the bridge and formal
+flow training, keeping expert prompts slower than VLM prompts. Action-only inpainting bypasses
+CABO because it does not use VLM prompts. VLM-relative action-gradient clipping remains disabled.
+Set `--policy.next_action_bridge_steps=0` to keep all Stage 1 updates
+action-only, or change it to adjust the bridge length; it must not exceed
+`next_action_pretrain_steps`. The bridge is enabled by the integrated two-stage run only, so a
+standalone `training_stage=next_action` invocation retains its original all-inpainting behavior.
+
+Set `--policy.next_action_pretrain_steps=0` to skip Stage 1; in that case the bridge setting is
+ignored. The compatibility name
+`training_stage=next_action` denotes the frozen-VLM Stage 1; its base objective is action-only flow
+inpainting rather than the former 25-to-25 MSE regression objective, and the integrated trainer
+overrides it with full flow during the configured bridge. The mask size and optional full-mask
+fraction can be changed with `--policy.next_action_masked_steps` and
+`--policy.next_action_full_mask_probability`.
+The legacy `next_action_context_steps` and `next_action_prediction_steps` fields are accepted only
+for loading older checkpoints and no longer affect training.
+
+### Key Training Parameters
+
+- **`--policy.compile_model=true`**: Enables optional model compilation (default: `false`)
+- **`--policy.gradient_checkpointing=true`**: Trades recomputation for activation memory (default: `false`)
+- **`--policy.dtype=bfloat16`**: Opts into BF16 mixed precision (default: `float32`)
+- For full FP32 training, use `accelerate launch --mixed_precision=no` with
+  `--policy.dtype=float32 --policy.use_amp=false`. PI05 also disables TF32 matrix multiplications
+  and cuDNN convolutions in this mode, including when `compile_model=true`.
+- **`--policy.num_vlm_prompt_tokens=16`**: Number of trainable VLM embeddings after observation/language tokens
+- **`--policy.num_prompt_tokens=16`**: Number of trainable expert embeddings before the action tokens
+- **`--policy.cabo_enabled=true`**: Enable CABO between the VLM and expert prompt banks
+- **`--policy.cabo_prompt_update_ratio=2.0`**: Limit expert prompts to half the VLM prompts' relative learning update
+- **`--policy.train_expert_only=true`**: Legacy flag, enforced; both backbones stay frozen and only prompts train
+- **`--batch_size=32`**: Batch size for training, adapt this based on your GPU memory
+- **`--policy.pretrained_path=lerobot/pi05_base`**: The base π₀.₅ model you want to finetune, options are:
+  - [lerobot/pi05_base](https://huggingface.co/lerobot/pi05_base)
+  - [lerobot/pi05_libero](https://huggingface.co/lerobot/pi05_libero) (specifically trained on the Libero dataset)
+
+### Training Parameters Explained
+
+Fresh π₀.₅ configurations use one scheduled AdamW learning rate for both prompt banks.
+After warmup, the learning rate follows a cosine decay from `2.5e-5` to a floor of
+`1e-5`. Compatible checkpoint resumes preserve their saved optimizer state and settings.
+The integrated Stage 1 uses a fixed `2.5e-5` peak learning rate and `1e-5` decay floor, matching the
+fresh Stage 2 defaults. Its optimizer and scheduler continue across the inpainting-to-bridge
+boundary, but their state is not carried into Stage 2. During an integrated two-stage run, Stage 2
+saves a checkpoint every 3,000 updates when checkpointing is enabled, and once more at the final
+update when the total step count is not divisible by 3,000.
+
+Global gradient clipping is disabled by default (`optimizer_grad_clip_norm=0.0`). Both prompt banks
+share the scheduled AdamW learning rate; CABO may attenuate the expert prompt learning update.
+`clip_action_head_by_vlm` must remain `false` for flow training because it requires a trainable VLM.
+
+CABO is enabled by default (`cabo_enabled=true`). AdamW uses two named optimizer groups,
+`vlm_prompt` and `action_prompt`. For each bank, CABO measures the relative learning update as
+`r = ||AdamW learning delta||₂ / ||prompt parameters||₂`, excluding decoupled weight decay.
+During observation-conditioned bridge and formal flow updates, the default
+`cabo_prompt_update_ratio=2.0` enforces `r_action <= r_vlm / 2`. It scales down an expert prompt
+update only when it exceeds this cap; the VLM prompt update is unchanged. This compares relative
+parameter movement after AdamW preconditioning, rather than raw gradient norms or token counts.
+Ratios of at least `1.0` are accepted; use a value greater than `1.0` to make the action prompt
+cap strictly lower than the VLM prompt update.
+
+Action-only inpainting bypasses CABO and updates expert prompts normally because VLM prompts are
+absent from that forward path. The three training phases, objectives, and step counts are unchanged.
+Set `cabo_enabled=false` to disable the controller, including for single-bank ablations or prompt-free
+inference. CABO requires `use_policy_training_preset=true` to build its named prompt groups.
+The old `cabo_expert_update_ratio`, `cabo_projection_update_ratio`, `cabo_vlm_update_ema_decay`,
+`cabo_update_warmup_steps`, and `cabo_vlm_update_floor_ratio` fields remain loadable for compatibility
+but do not affect prompt CABO. There is no separate CABO warmup or EMA; the normal learning-rate
+scheduler retains its configured warmup.
+
+| Parameter                    | Default  | Description                                                        |
+| ---------------------------- | -------- | ------------------------------------------------------------------ |
+| `num_vlm_prompt_tokens`       | `16`     | Trainable VLM prompts after observation/language tokens; `0` disables them |
+| `num_prompt_tokens`           | `16`     | Trainable expert prompts before action tokens; `0` disables them    |
+| `prompt_init_std`             | `0.02`   | Standard deviation for new prompt embeddings                        |
+| `next_action_pretrain_steps`  | `1000`   | Total Stage 1 updates before formal Stage 2                          |
+| `next_action_bridge_steps`    | `250`    | Final Stage 1 updates training both prompt banks with full flow      |
+| `optimizer_lr`               | `2.5e-5` | AdamW learning rate for both prompt banks                            |
+| `scheduler_decay_lr`         | `1e-5`   | Learning-rate floor after cosine decay                               |
+| `save_freq`                  | `10000`  | General trainer default; integrated Stage 2 saves every 3,000 steps |
+| `clip_action_head_by_vlm`    | `false`  | Must be disabled for flow training with the frozen VLM               |
+| `optimizer_grad_clip_norm`   | `0.0`    | Disable global gradient clipping                                    |
+| `cabo_enabled`               | `true`   | Limit expert prompt learning updates using VLM prompt updates       |
+| `cabo_prompt_update_ratio`   | `2.0`    | Enforce `r_action <= r_vlm / ratio` during bridge and formal flow      |
+| `freeze_vision_encoder`      | `true`   | Enforced: keep the vision encoder frozen                             |
+| `train_expert_only`          | `true`   | Enforced legacy flag; only the two prompt banks train                |
+
+### Loading existing checkpoints
+
+Base π₀.₅ checkpoints and older full-model checkpoints initialize any missing prompt banks using
+their configured counts and `prompt_init_std`. Existing expert prompt weights are preserved when
+adding VLM prompts. Checkpoints saved by this variant include both prompt banks, so loading them
+preserves the learned prompts. Keep both saved prompt counts when continuing a trained checkpoint.
+
+When moving an older training run to this variant, start a new run with
+`--policy.pretrained_path=/path/to/pretrained_model`. An old optimizer state may have a different
+parameter layout because VLM prompts were added and action parameters are now frozen; it does not
+match the new prompt-only optimizer. Prompt CABO uses separate `vlm_prompt` and `action_prompt`
+groups, so a former single-group prompt optimizer also requires a new optimizer. Initialize it from saved model weights with
+`--policy.pretrained_path`; direct `--resume=true` requires the same optimizer group layout.
+Older configurations must set `--policy.clip_action_head_by_vlm=false` for flow training.
+Saved configurations preserve their CABO values, including an older `false` setting or ratio of
+`1.0`. Pass `--policy.cabo_enabled=true --policy.cabo_prompt_update_ratio=2.0` explicitly when
+loading those weights to enable the new prompt update cap.
+
+PEFT saves both `model.vlm_prompt_tokens` and `model.prompt_tokens` through `modules_to_save`;
+the default configuration adds no backbone LoRA adapters. Custom backbone adapters also remain
+frozen. Older adapters must save every enabled prompt bank. To load an expert-prompt-only adapter,
+set `num_vlm_prompt_tokens=0` and `cabo_enabled=false`; an adapter with neither bank requires both
+counts to be `0` and CABO disabled for inference. Start from a full-model checkpoint when adding a
+prompt bank absent from a legacy adapter.
+
+If your dataset is not converted with `quantiles`, you can convert it with the following command:
+
+```bash
+python src/lerobot/scripts/augment_dataset_quantile_stats.py \
+    --repo-id=your_dataset \
+```
+
+Or train pi05 with this normalization mapping: `--policy.normalization_mapping='{"ACTION": "MEAN_STD", "STATE": "MEAN_STD", "VISUAL": "IDENTITY"}'`
+
+## Relative Actions
+
+By default, π₀.₅ predicts absolute actions. You can enable **relative actions** so the model predicts offsets relative to the current robot state. This can improve training stability for certain setups.
+
+To use relative actions, first recompute your dataset stats in relative space via the CLI:
+
+```bash
+lerobot-edit-dataset \
+    --repo_id your_dataset \
+    --operation.type recompute_stats \
+    --operation.relative_action true \
+    --operation.chunk_size 50 \
+    --operation.relative_exclude_joints "['gripper']" \
+    --push_to_hub true
+```
+
+Or equivalently in Python:
+
+```python
+from lerobot.datasets import LeRobotDataset, recompute_stats
+
+dataset = LeRobotDataset("your_dataset")
+recompute_stats(dataset, relative_action=True, chunk_size=50, relative_exclude_joints=["gripper"])
+dataset.push_to_hub()
+```
+
+The `chunk_size` should match your policy's `chunk_size` (default 50 for π₀.₅). `relative_exclude_joints` lists joint names that should remain in absolute space (e.g. gripper commands). Use `--push_to_hub true` to upload the updated stats to the Hub.
+
+Then train with relative actions enabled:
+
+```bash
+lerobot-train \
+    --dataset.repo_id=your_dataset \
+    --policy.type=pi05 \
+    --policy.use_relative_actions=true \
+    --policy.relative_exclude_joints='["gripper"]' \
+    ...
+```
+
+## Performance Results
+
+### Libero Benchmark Results
+
+The following results describe the upstream LeRobot π₀.₅ implementation. They have not been
+re-measured for this repository's prompt-only variant with frozen VLM and action expert.
+
+π₀.₅ has demonstrated strong performance on the Libero benchmark suite. To compare and test its LeRobot implementation, we finetuned the libero base model for an additional 6k steps on the Libero dataset and compared the results to the OpenPI reference results.
+
+| Benchmark          | LeRobot Implementation | OpenPI Reference |
+| ------------------ | ---------------------- | ---------------- |
+| **Libero Spatial** | 97.0%                  | 98.8%            |
+| **Libero Object**  | 99.0%                  | 98.2%            |
+| **Libero Goal**    | 98.0%                  | 98.0%            |
+| **Libero 10**      | 96.0%                  | 92.4%            |
+| **Average**        | 97.5%                  | 96.85%           |
+
+These results demonstrate π₀.₅'s strong generalization capabilities across diverse robotic manipulation tasks. To reproduce these results, you can follow the instructions in the [Libero](https://huggingface.co/docs/lerobot/libero) section.
+
+## License
+
+This model follows the **Apache 2.0 License**, consistent with the original [OpenPI repository](https://github.com/Physical-Intelligence/openpi).

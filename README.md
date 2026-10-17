@@ -18,8 +18,9 @@ requires the full backbone.
 
 This independent repository continues the `vlm-only` work from
 `LianYi233/lerobot060`, including the P/D/E/T experiment at commit
-`ac06d51011450f76724c64ed3b7ef1e3d93aa523`. Git history and upstream license notices
-are retained. The default development branch is `main`.
+`ac06d51011450f76724c64ed3b7ef1e3d93aa523`. This repository starts from that code
+snapshot; earlier Git history remains in the source repository. Upstream license
+notices are retained. The default development branch is `main`.
 
 The implementation is based on Hugging Face LeRobot. The Python package and CLI
 names remain `lerobot`, `lerobot-train`, and `lerobot-eval` so existing checkpoints,
