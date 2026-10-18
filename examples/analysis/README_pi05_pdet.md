@@ -101,7 +101,33 @@ python -m lerobot.scripts.pdet_experiment audit \
 若替换单个因素都无效、替换 D/E/T 全部后有效，后续补二因素组合检查交互。
 若多个单因素替换均能恢复，说明退化可能依赖组合，不能唯一归因给其中一个因素。
 
-单模型评估可直接使用既有脚本，固定 EVAL_SEED，与训练 D/E/T 分开：
+七组按训练顺序依次测试（前五组先测，补训的 `1110`、`1000` 最后测）：
+
+```bash
+cd /home/wyn/VLAA/PromptVLA
+env -u PRETRAINED_PATH -u RUN_NAME -u VLM_PROMPT_TOKENS \
+    -u BASE_CKPT -u BASE_MODEL_PATH \
+CKPT_ROOT=/data1/wyn/chkpt/2601-lerobot/PromptVLA \
+BASE_OUTPUT=/data1/wyn/chkpt/2601-lerobot/PromptVLA/eval \
+LOG_ROOT=/data1/wyn/chkpt/2601-lerobot/logs \
+RUN_PREFIX=pi05-pdet GPU_ID=2 CHECKPOINT_STEP=3000 \
+EVAL_SEED=1000 EPISODES_PER_TASK=10 PROGRESS=true \
+PDET_CASES="1111 0000 0111 1011 1101 1110 1000" \
+WAIT_FOR_CHECKPOINTS=true \
+bash run_eval_libero_vlm_only_pdet_sweep.sh all
+```
+
+默认使用 2 号 GPU，训练继续使用 0、1 号 GPU；每个模型测试四个 suite，共 400 个 episode。
+终端只显示一条实时进度及每个模型最终成功率，详细输出和视频路径保存在 `LOG_ROOT/eval`。
+按顺序逐个检查模型，后面的模型未训练完不会阻止前面的模型评估。
+轮到未保存完的模型时，等待训练器在完整保存后发布的 `checkpoints/last` 指向 `003000`；
+仅有目录或正在写入的 `model.safetensors` 不算完成。默认每 30 秒检查，每个模型最多等 6 小时
+（`WAIT_INTERVAL_SECONDS` / `WAIT_TIMEOUT_SECONDS` 可调整）；训练失败时不会自动重启训练。
+评估前核对保存的训练配置中 P/D/E/T 是否与目录名一致，并沿用原 VLM-only 模型/处理器检查。
+评估失败即停止并显示日志路径；重新执行时沿用逐任务续测检查。
+只补测最后两组可设置 `PDET_CASES="1110 1000"`。
+
+单模型评估也可直接使用既有脚本，固定 EVAL_SEED，与训练 D/E/T 分开：
 
 ```bash
 PRETRAINED_PATH=/home/wyn/models/lerobot/pi05_libero_base \

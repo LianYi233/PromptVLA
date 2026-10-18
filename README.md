@@ -125,6 +125,7 @@ W&B continues to use the `prompt-learning` project for comparison with existing 
 | Independent P/D/E/T experiment | `examples/training/train_pi05_vlm_only_pdet_sweep.sh` |
 | Evaluate one checkpoint | `run_eval_libero_vlm_only.sh` |
 | Evaluate a token sweep | `run_eval_libero_vlm_only_token_sweep.sh` |
+| Evaluate P/D/E/T runs in order, waiting for final checkpoints | `run_eval_libero_vlm_only_pdet_sweep.sh` |
 
 The P/D/E/T experiment uses token=2 and independently controls the imported prompt
 initialization (P), sample order (D), Gaussian flow noise (E), and Beta flow time (T).

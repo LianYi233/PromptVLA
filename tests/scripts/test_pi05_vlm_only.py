@@ -7,6 +7,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -23,6 +25,7 @@ SWEEP = ROOT / "examples/training/train_pi05_vlm_only_token_sweep.sh"
 RANK_SWEEP = ROOT / "examples/training/train_pi05_vlm_only_rank_sweep.sh"
 EVAL = ROOT / "run_eval_libero_vlm_only.sh"
 EVAL_SWEEP = ROOT / "run_eval_libero_vlm_only_token_sweep.sh"
+PDET_EVAL_SWEEP = ROOT / "run_eval_libero_vlm_only_pdet_sweep.sh"
 
 
 class VLMOnlyTest(unittest.TestCase):
@@ -281,6 +284,143 @@ class VLMOnlyTest(unittest.TestCase):
             for line in result.stdout.splitlines()
             if line.startswith("env CUDA_VISIBLE_DEVICES=")
         ]
+
+    def make_pdet_eval_model(self, case, published=True):
+        name = "pi05-pdet-base-vlm2-" + "-".join(
+            f"{key}{value}" for key, value in zip("PDET", case, strict=True)
+        )
+        checkpoint = self.work / "checkpoints" / name / "checkpoints/003000"
+        model = checkpoint / "pretrained_model"
+        self.make_model(model, "base", tokens=2)
+        config_path = model / "train_config.json"
+        config = json.loads(config_path.read_text())
+        config.update(
+            seed=0,
+            pdet={
+                "enabled": True,
+                **dict(
+                    zip(
+                        ("prompt_seed", "data_seed", "noise_seed", "time_seed"),
+                        map(int, case),
+                        strict=True,
+                    )
+                ),
+            },
+        )
+        config_path.write_text(json.dumps(config))
+        if published:
+            (checkpoint.parent / "last").symlink_to("003000")
+        return name, checkpoint
+
+    def test_pdet_eval_order_protocol_progress_and_quiet_results(self):
+        cases = "1111 0000 0111 1011 1101 1110 1000".split()
+        names = [self.make_pdet_eval_model(case)[0] for case in cases]
+        capture = self.install_fake_evaluator()
+        result = self.run_script(PDET_EVAL_SWEEP, DRY_RUN="false", PROGRESS="true")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        launches = [json.loads(line) for line in capture.read_text().splitlines()]
+        self.assertEqual([Path(run["--policy.path"]).parents[2].name for run in launches], names)
+        for run in launches:
+            self.assertEqual(run["gpu"], "2")
+            self.assertEqual(run["--seed"], "1000")
+            self.assertEqual(run["--eval.n_episodes"], "10")
+            self.assertEqual(run["--policy.n_action_steps"], "10")
+            self.assertEqual(run["--env.task"], "libero_spatial,libero_object,libero_goal,libero_10")
+        self.assertEqual(result.stdout.count("overall: 90.00% (360/400)"), 7)
+        self.assertIn("[7/7] P1-D0-E0-T0: 50% 200/400 [ETA 10:00]", result.stderr)
+        for noise in ("progress-noise", ".mp4", "No step-0"):
+            self.assertNotIn(noise, result.stdout + result.stderr)
+        self.assertTrue(
+            any("video-path.mp4" in p.read_text() for p in Path(self.env["EVAL_LOG_ROOT"]).glob("*.log"))
+        )
+
+    def test_pdet_eval_does_not_block_earlier_runs_or_read_unpublished_weights(self):
+        name, _ = self.make_pdet_eval_model("1111")
+        self.make_pdet_eval_model("1110", published=False)
+        capture = self.install_fake_evaluator()
+        result = self.run_script(
+            PDET_EVAL_SWEEP,
+            DRY_RUN="false",
+            PDET_CASES="1111 1110",
+            WAIT_TIMEOUT_SECONDS="1",
+            WAIT_INTERVAL_SECONDS="1",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        launches = [json.loads(line) for line in capture.read_text().splitlines()]
+        self.assertEqual([Path(run["--policy.path"]).parents[2].name for run in launches], [name])
+        self.assertEqual(result.stdout.count("overall:"), 1)
+        self.assertIn("Timed out waiting for pi05-pdet-base-vlm2-P1-D1-E1-T0", result.stderr)
+
+    def test_pdet_eval_waits_for_publication_then_continues(self):
+        first, _ = self.make_pdet_eval_model("1111")
+        second, checkpoint = self.make_pdet_eval_model("1110", published=False)
+        capture = self.install_fake_evaluator()
+        stop = threading.Event()
+
+        def publish_after_first_eval():
+            deadline = time.monotonic() + 20
+            while not stop.is_set() and time.monotonic() < deadline:
+                if capture.exists() and capture.stat().st_size > 0:
+                    if not stop.wait(0.5):
+                        (checkpoint.parent / "last").symlink_to("003000")
+                    return
+                stop.wait(0.05)
+
+        publisher = threading.Thread(target=publish_after_first_eval)
+        publisher.start()
+        try:
+            result = self.run_script(
+                PDET_EVAL_SWEEP,
+                DRY_RUN="false",
+                PDET_CASES="1111 1110",
+                WAIT_TIMEOUT_SECONDS="10",
+                WAIT_INTERVAL_SECONDS="1",
+            )
+        finally:
+            stop.set()
+            publisher.join()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        launches = [json.loads(line) for line in capture.read_text().splitlines()]
+        self.assertEqual([Path(run["--policy.path"]).parents[2].name for run in launches], [first, second])
+        self.assertEqual(result.stdout.count("overall:"), 2)
+
+    def test_pdet_eval_rejects_mislabeled_checkpoint_and_failed_or_incomplete_results(self):
+        first, checkpoint = self.make_pdet_eval_model("1111")
+        self.make_pdet_eval_model("0000")
+        capture = self.install_fake_evaluator()
+        config_path = checkpoint / "pretrained_model/train_config.json"
+        config = json.loads(config_path.read_text())
+        config["pdet"]["time_seed"] = 0
+        config_path.write_text(json.dumps(config))
+        result = self.run_script(PDET_EVAL_SWEEP, DRY_RUN="false", PDET_CASES="1111 0000")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(capture.exists())
+        self.assertIn("Evaluation/preflight failed", result.stderr)
+        config["pdet"]["time_seed"] = 1
+        config_path.write_text(json.dumps(config))
+        good = self.run_script(PDET_EVAL_SWEEP, DRY_RUN="false", PDET_CASES="1111")
+        self.assertEqual(good.returncode, 0, good.stderr)
+        for overrides in ({"FAIL_RUN": first}, {"BAD_RESULT": "missing"}, {"BAD_RESULT": "episodes"}):
+            with self.subTest(overrides=overrides):
+                result = self.run_script(
+                    PDET_EVAL_SWEEP, DRY_RUN="false", PDET_CASES="1111 0000", **overrides
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertNotIn("overall:", result.stdout)
+        launches = [json.loads(line) for line in capture.read_text().splitlines()]
+        self.assertEqual([Path(run["--policy.path"]).parents[2].name for run in launches], [first] * 4)
+
+    def test_pdet_eval_dry_run_does_not_write_or_wait(self):
+        self.make_pdet_eval_model("1111")
+        result = self.run_script(PDET_EVAL_SWEEP, PDET_CASES="1111")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--seed=1000", result.stdout)
+        self.assertFalse((self.work / "eval").exists())
+        result = self.run_script(PDET_EVAL_SWEEP, PDET_CASES="1110")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Completed checkpoint not ready", result.stderr)
+        result = self.run_script(PDET_EVAL_SWEEP, PDET_CASES="1111 1111")
+        self.assertEqual(result.returncode, 2)
 
     def test_default_pair_assigns_distinct_gpus_sources_ports_and_prompt_only_recipe(self):
         commands = self.commands(self.run_script(PAIR, "0"))
