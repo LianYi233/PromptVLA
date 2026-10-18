@@ -159,6 +159,88 @@ def test_audit_detects_unintended_coupling_and_resume_changes(tmp_path, policy, 
         audit_runs(runs)
 
 
+@pytest.fixture
+def revision_audit(tmp_path, policy, batch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(
+            ["git", "-c", "user.name=Audit Test", "-c", "user.email=audit@example.invalid", *args],
+            cwd=repo, text=True,
+        ).strip()
+
+    git("init", "-q")
+    git("commit", "-q", "--allow-empty", "-m", "Initial")
+    base = git("rev-parse", "HEAD")
+    runs = []
+    for name, noise in (("first", 0), ("second", 1)):
+        cfg = make_config(tmp_path / name, PDETConfig(enabled=True, noise_seed=noise, audit_steps=2))
+        runs.append(cfg.output_dir)
+        streams = PDETStreams(cfg, policy, accelerator(size=1))
+        for step in range(2):
+            streams.draw(policy, batch, step, batch["index"])
+        path = cfg.output_dir / "pdet/manifest-rank0.json"
+        manifest = json.loads(path.read_text())
+        manifest["git_commit"] = base
+        path.write_text(json.dumps(manifest))
+
+    def record_second_commit(sha):
+        path = runs[1] / "pdet/manifest-rank0.json"
+        manifest = json.loads(path.read_text())
+        manifest["git_commit"] = sha
+        path.write_text(json.dumps(manifest))
+
+    return SimpleNamespace(repo=repo, git=git, runs=runs, set_commit=record_second_commit)
+
+
+@pytest.mark.parametrize(
+    "path,allowed",
+    [
+        ("README.md", True),
+        ("run_eval_libero_vlm_only_pdet_sweep.sh", True),
+        ("src/lerobot/scripts/pdet_experiment.py", True),
+        ("src/lerobot/policies/pi05/modeling_pi05.py", False),
+        ("examples/training/train_pi05_vlm_only.sh", False),
+        ("pyproject.toml", False),
+    ],
+)
+def test_audit_inspects_actual_commit_changes(revision_audit, path, allowed):
+    fixture = revision_audit
+    file = fixture.repo / path
+    file.parent.mkdir(parents=True, exist_ok=True)
+    file.write_text("changed\n")
+    fixture.git("add", path)
+    fixture.git("commit", "-q", "-m", "Change")
+    fixture.set_commit(fixture.git("rev-parse", "HEAD"))
+    if allowed:
+        result = audit_runs(fixture.runs, repo_root=fixture.repo)
+        assert result["audit"] == result["random_inputs"] == "passed"
+        assert result["code_revision"]["status"] == "non_training_changes_only"
+        assert result["code_revision"]["comparisons"][0]["changed_paths"] == [path]
+    else:
+        with pytest.raises(ValueError, match="training-relevant or unclassified"):
+            audit_runs(fixture.runs, repo_root=fixture.repo)
+        result = audit_runs(fixture.runs, repo_root=fixture.repo, inputs_only=True)
+        assert result["audit"] == "inputs_only_passed"
+        assert result["code_revision"]["status"] == "not_verified"
+
+
+def test_audit_unknown_history_and_inputs_only_still_check_randomness(revision_audit):
+    fixture = revision_audit
+    fixture.set_commit("f" * 40)
+    with pytest.raises(ValueError, match="Cannot inspect recorded Git revisions"):
+        audit_runs(fixture.runs, repo_root=fixture.repo)
+    assert audit_runs(fixture.runs, inputs_only=True)["code_revision"]["status"] == "not_verified"
+    path = fixture.runs[1] / "pdet/inputs-rank0.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    rows[0]["time_sha256"] = "wrong"
+    path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    for inputs_only in (False, True):
+        with pytest.raises(ValueError, match="Random factor isolation failed for time_seed"):
+            audit_runs(fixture.runs, repo_root=fixture.repo, inputs_only=inputs_only)
+
+
 def test_explicit_draws_reach_real_policy_forward_and_flow_loss(policy, batch):
     # Execute the actual public forward, observation-flow preparation and loss reduction.
     from lerobot.utils.constants import ACTION, OBS_LANGUAGE_ATTENTION_MASK, OBS_LANGUAGE_TOKENS

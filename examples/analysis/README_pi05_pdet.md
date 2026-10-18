@@ -101,6 +101,37 @@ python -m lerobot.scripts.pdet_experiment audit \
 若替换单个因素都无效、替换 D/E/T 全部后有效，后续补二因素组合检查交互。
 若多个单因素替换均能恢复，说明退化可能依赖组合，不能唯一归因给其中一个因素。
 
+审计会分别报告 `random_inputs` 和 `code_revision`。记录的 Git 提交不同时，
+自动在本地比较两个提交的文件差异；仅文档、测试、独立 LIBERO 评估入口或审计入口变化时，
+继续审计并报告 `non_training_changes_only`，同时列出实际提交和变更文件。
+例如 `f3809e18` 到 `522f1340` 只新增了评估入口并更新测试/文档，训练代码相同。
+训练源码、启动脚本、依赖或未分类文件变化仍会报错；不会改写已有 manifest。
+本地缺少记录的提交时应先获取相应 Git 历史。
+诊断时可加 `audit --inputs-only ...`，但此时只能得到 `inputs_only_passed`，
+代码版本标记为 `not_verified`，不能当作完整审计通过。历史未提交改动没有记录，
+此检查也不能证明它们不存在。
+
+七组完成后，补齐初始化/数据对照及最差组的噪声/时间替换：
+
+```bash
+env -u PRETRAINED_PATH -u RUN_NAME -u VLM_PROMPT_TOKENS \
+    -u PROMPT_INIT_PATH -u PROMPT_EXPORT_PATH -u PROMPT_EXPORT_REFERENCE \
+OUTPUT_ROOT=/data1/wyn/chkpt/2601-lerobot/PromptVLA \
+LOG_ROOT=/data1/wyn/chkpt/2601-lerobot/logs \
+PROMPT_INIT_DIR=/data1/wyn/prompt-work \
+RUN_PREFIX=pi05-pdet GPU_IDS=0,1 BATCH_SIZE=32 \
+PDET_CASES="0011 1001 1010" \
+RANK_FREQ=250 RANK_SAMPLES=16 RANK_OUTPUT_PROBES=4 \
+RANK_SEED=2026 RANK_TIMESTEPS='[0.2,0.5,0.8]' \
+bash examples/training/train_pi05_vlm_only_pdet_sweep.sh \
+  --wandb.enable=true --wandb.project=prompt-learning \
+  --wandb.mode=online --wandb.disable_artifact=true
+```
+
+沿用已保存的同一对 P0/P1 初值、相同数据和训练配置；每组仍为两卡、总 batch 64、
+3000 steps、只保存最终完整模型。已有的七组目录不会被本命令选中。
+补充评估时用下面评估命令并将 `PDET_CASES` 同样改为 `"0011 1001 1010"`。
+
 七组按训练顺序依次测试（前五组先测，补训的 `1110`、`1000` 最后测）：
 
 ```bash

@@ -2,6 +2,8 @@
 
 import argparse
 import json
+import re
+import subprocess
 from itertools import combinations
 from pathlib import Path
 
@@ -20,7 +22,62 @@ def check_initializations(directory):
     return {f"P{seed}": digest for seed, digest in enumerate(hashes)}
 
 
-def audit_runs(runs):
+def _non_training_path(path):
+    """Conservatively permit documentation, tests and standalone evaluation/audit entry points."""
+    return (
+        path in {"README.md", "README_LEROBOT.md", "AGENTS.md", "AGENT_GUIDE.md"}
+        or path.startswith(("docs/", "tests/"))
+        or (path.startswith("examples/analysis/") and path.endswith(".md"))
+        or ("/" not in path and path.startswith("run_eval_libero") and path.endswith(".sh"))
+        or path == "src/lerobot/scripts/pdet_experiment.py"
+    )
+
+
+def audit_code_revisions(records, repo_root=None, *, inputs_only=False):
+    commits = sorted({row[2].get("git_commit") for row in records}, key=str)
+    report = {
+        "commits": commits,
+        "scope": "Recorded Git trees only; historical uncommitted changes were not captured",
+    }
+    if inputs_only:
+        return {**report, "status": "not_verified"}
+    if any(not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40,64}", sha) for sha in commits):
+        raise ValueError(
+            f"Missing/invalid recorded git_commit: {commits}. "
+            "Use --inputs-only for input diagnostics without claiming code equivalence."
+        )
+    if len(commits) == 1:
+        return {**report, "status": "same_recorded_commit"}
+    repo_root = Path(repo_root) if repo_root is not None else Path(__file__).resolve().parents[3]
+    comparisons = []
+    for other in commits[1:]:
+        try:
+            # Commits are validated hex identifiers; never fetch or modify the checkout.
+            result = subprocess.run(
+                [
+                    "git", "diff", "--no-ext-diff", "--no-textconv", "--no-renames",
+                    "--name-only", "-z", f"{commits[0]}^{{commit}}", f"{other}^{{commit}}", "--",
+                ],
+                cwd=repo_root, capture_output=True, check=True, timeout=15,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise ValueError(
+                f"Cannot inspect recorded Git revisions {commits[0]} vs {other} locally. "
+                "Fetch the recorded history, or use --inputs-only for input diagnostics only."
+            ) from error
+        paths = [p.decode("utf-8", errors="surrogateescape") for p in result.stdout.split(b"\0") if p]
+        protected = [path for path in paths if not _non_training_path(path)]
+        if protected:
+            raise ValueError(
+                f"Different git_commit with training-relevant or unclassified changes: "
+                f"{commits[0]} vs {other}: {protected}. "
+                "Review these changes; --inputs-only checks random inputs without approving code equivalence."
+            )
+        comparisons.append({"from": commits[0], "to": other, "changed_paths": paths})
+    return {**report, "status": "non_training_changes_only", "comparisons": comparisons}
+
+
+def audit_runs(runs, *, repo_root=None, inputs_only=False):
     records = []
     for run in runs:
         directory = Path(run) / "pdet"
@@ -59,7 +116,6 @@ def audit_runs(runs):
             "source_pretrained_path",
             "dataset_root",
             "versions",
-            "git_commit",
             "cuda",
             "recipe",
         ):
@@ -83,8 +139,13 @@ def audit_runs(runs):
         comparisons += 1
     if comparisons == 0:
         raise ValueError("Need at least two runs for a cross-run factor audit")
+    # Finish configuration/input checks first. Different commit IDs alone do not
+    # establish a training-code change, e.g. adding an evaluation launcher mid-sweep.
+    code_revision = audit_code_revisions(records, repo_root, inputs_only=inputs_only)
     return {
-        "audit": "passed",
+        "audit": "inputs_only_passed" if inputs_only else "passed",
+        "random_inputs": "passed",
+        "code_revision": code_revision,
         "run_pairs_per_rank": comparisons,
         "scope": "Initial audited inputs only; not a proof of complete numerical determinism",
     }
@@ -94,9 +155,18 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("check-inits").add_argument("directory", type=Path)
-    sub.add_parser("audit").add_argument("runs", nargs="+", type=Path)
+    audit = sub.add_parser("audit")
+    audit.add_argument("runs", nargs="+", type=Path)
+    audit.add_argument(
+        "--inputs-only", action="store_true",
+        help="Check configuration/random inputs only; report code revision as NOT verified",
+    )
     args = parser.parse_args()
-    result = check_initializations(args.directory) if args.command == "check-inits" else audit_runs(args.runs)
+    result = (
+        check_initializations(args.directory)
+        if args.command == "check-inits"
+        else audit_runs(args.runs, inputs_only=args.inputs_only)
+    )
     print(json.dumps(result, indent=2))
 
 
