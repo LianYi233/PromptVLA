@@ -25,8 +25,30 @@ def stream_seed(factor: str, seed: int, step: int, rank: int) -> int:
     return int.from_bytes(hashlib.sha256(payload).digest()[:8], "little") & ((1 << 63) - 1)
 
 
-def sample_flow(policy, batch, config: PDETConfig, step: int, rank: int) -> dict:
+def sample_flow(policy, batch, config: PDETConfig, step: int, rank: int, occurrences=None) -> dict:
     actions = policy.prepare_action(batch)
+    if config.order_plan is not None:
+        from lerobot.utils.pdet_order import FLOW_PROTOCOL
+
+        if occurrences is None or len(occurrences) != len(actions):
+            raise ValueError("Occurrence-keyed flow requires one immutable occurrence ID per sample")
+        noise_rows, time_rows = [], []
+        # CPU draws make keys independent of GPU/rank/batch position. All generator state is local.
+        for occurrence in torch.as_tensor(occurrences).cpu().tolist():
+
+            def seed_for(factor, seed, occurrence=occurrence):
+                payload = f"{FLOW_PROTOCOL}:{factor}:{seed}:{int(occurrence)}".encode()
+                return int.from_bytes(hashlib.sha256(payload).digest()[:8], "little") & ((1 << 63) - 1)
+
+            generator = torch.Generator().manual_seed(seed_for("E", config.noise_seed))
+            noise_rows.append(torch.randn(actions.shape[1:], generator=generator, dtype=torch.float32))
+            with torch.random.fork_rng(devices=[]):
+                torch.random.default_generator.manual_seed(seed_for("T", config.time_seed))
+                time_rows.append(policy.model.sample_time(1, torch.device("cpu")))
+        return {
+            "noise": torch.stack(noise_rows).to(actions.device),
+            "time": torch.cat(time_rows).to(actions.device),
+        }
     generator = torch.Generator(device=actions.device).manual_seed(
         stream_seed("E", config.noise_seed, step, rank)
     )
@@ -67,6 +89,13 @@ def audit_record(indices, draws: dict, *, step: int, rank: int) -> dict:
 
 
 def runtime_info() -> dict:
+    root = Path(__file__).resolve().parents[3]
+    source_digest = hashlib.sha256()
+    # Include on-disk edits, not just HEAD. No credentials/environment variables are recorded.
+    paths = sorted((root / "src/lerobot").rglob("*.py")) + sorted((root / "examples/training").rglob("*.sh"))
+    for path in paths:
+        source_digest.update(str(path.relative_to(root)).encode() + b"\0")
+        source_digest.update(hashlib.sha256(path.read_bytes()).digest())
     versions = {}
     for name in ("torch", "numpy", "transformers", "accelerate"):
         try:
@@ -85,7 +114,12 @@ def runtime_info() -> dict:
         )
     except (OSError, subprocess.CalledProcessError):
         commit = None
-    return {"versions": versions, "git_commit": commit, "cuda": torch.version.cuda}
+    return {
+        "versions": versions,
+        "git_commit": commit,
+        "cuda": torch.version.cuda,
+        "source_tree_sha256": source_digest.hexdigest(),
+    }
 
 
 class PDETStreams:
@@ -96,8 +130,27 @@ class PDETStreams:
         self.directory.mkdir(parents=True, exist_ok=True)
         self.audit_path = self.directory / f"inputs-rank{self.rank}.jsonl"
         path = self.directory / f"manifest-rank{self.rank}.json"
+        self.frames = None
+        self.plan = None
+        if cfg.pdet.diagnostics or cfg.pdet.order_plan is not None:
+            from lerobot.utils.pdet_order import read_frame_metadata
+
+            self.frames = read_frame_metadata(cfg.dataset.root)
+        protocol = PROTOCOL
+        if cfg.pdet.order_plan is not None:
+            from lerobot.utils.pdet_order import FLOW_PROTOCOL, load_plan, validate_plan_dataset
+
+            self.plan = load_plan(cfg.pdet.order_plan)
+            validate_plan_dataset(
+                self.plan,
+                self.frames,
+                steps=cfg.steps,
+                batch_size=cfg.batch_size,
+                world_size=accelerator.num_processes,
+            )
+            protocol = FLOW_PROTOCOL
         invariants = {
-            "protocol": PROTOCOL,
+            "protocol": protocol,
             "factors": asdict(cfg.pdet),
             "global_seed": cfg.seed,
             "world_size": accelerator.num_processes,
@@ -105,6 +158,12 @@ class PDETStreams:
             "tokens": policy.config.num_vlm_prompt_tokens,
             "dtype": str(policy.model.vlm_prompt_tokens.weight.dtype),
         }
+        if self.plan is not None:
+            invariants["order_plan"] = self.plan["manifest"]
+        if self.frames is not None:
+            from lerobot.utils.pdet_order import arrays_hash
+
+            invariants["dataset_metadata_sha256"] = arrays_hash(self.frames)
         if cfg.resume:
             previous = json.loads(path.read_text())
             if any(previous.get(key) != value for key, value in invariants.items()):
@@ -134,10 +193,49 @@ class PDETStreams:
                 json.dump(record, handle, indent=2)
                 handle.write("\n")
 
-    def draw(self, policy, batch, step: int, indices) -> dict:
-        draws = sample_flow(policy, batch, self.config, step, self.rank)
+    def draw(self, policy, batch, step: int, indices, occurrences=None) -> dict:
+        draws = sample_flow(policy, batch, self.config, step, self.rank, occurrences)
         if step < self.config.audit_steps:
             record = audit_record(indices, draws, step=step, rank=self.rank)
+            if self.frames is not None:
+                for key in ("task_index", "episode_index", "frame_index", "phase_bin", "gripper_change"):
+                    record[key] = self.frames[key][record["sample_ids"]].tolist()
+            if self.plan is not None:
+                occurrence_ids = torch.as_tensor(occurrences).cpu().reshape(-1).tolist()
+                start = (step * self.plan["manifest"]["world_size"] + self.rank) * len(occurrence_ids)
+                expected = self.plan["order"][start : start + len(occurrence_ids)].tolist()
+                if occurrence_ids != expected:
+                    raise ValueError("Actual DDP task-slot assignment differs from the recorded plan")
+                if self.plan["index"][occurrence_ids].tolist() != record["sample_ids"]:
+                    raise ValueError("Occurrence IDs no longer refer to the recorded frames")
+                record["occurrence_ids"] = occurrence_ids
+                # Transfer each tensor once; per-occurrence hashes verify E/T after reordering.
+                cpu_draws = {key: value.detach().cpu() for key, value in draws.items()}
+                for key, value in cpu_draws.items():
+                    record[f"occurrence_{key}_sha256"] = [tensor_hash(row) for row in value]
             with self.audit_path.open("a") as handle:
                 handle.write(json.dumps(record, sort_keys=True) + "\n")
         return draws
+
+
+class PromptUpdateMonitor:
+    """Only 4096 prompt parameters are copied. No RNG, forward pass or optimizer changes."""
+
+    def __init__(self, policy):
+        self.parameter = policy.model.vlm_prompt_tokens.weight
+
+    def before_step(self):
+        self.before = self.parameter.detach().float().clone()
+        gradient = self.parameter.grad
+        self.gradient_norm = float(gradient.detach().float().norm()) if gradient is not None else 0.0
+
+    def after_step(self):
+        norm = float(self.before.norm())
+        delta = float((self.parameter.detach().float() - self.before).norm())
+        del self.before
+        return {
+            "prompt_update/grad_norm": self.gradient_norm,
+            "prompt_update/parameter_norm": norm,
+            "prompt_update/update_norm": delta,
+            "prompt_update/relative_update": delta / max(norm, 1e-12),
+        }

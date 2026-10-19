@@ -13,6 +13,8 @@ class PromptRankConfig:
     timesteps: list[float] = field(default_factory=lambda: [0.2, 0.5, 0.8])
     # Independent of training seed and token count, for paired comparisons.
     seed: int = 2026
+    extra_steps: list[int] = field(default_factory=list)
+    fixed_flow_loss: bool = False
 
     def validate(self) -> None:
         for name in ("freq", "seed"):
@@ -25,3 +27,5 @@ class PromptRankConfig:
             raise ValueError("prompt_rank.timesteps must be a nonempty list strictly between 0 and 1")
         if len(set(self.timesteps)) != len(self.timesteps):
             raise ValueError("prompt_rank.timesteps must be distinct")
+        if any(type(step) is not int or step < 0 for step in self.extra_steps):
+            raise ValueError("prompt_rank.extra_steps must contain nonnegative integers")

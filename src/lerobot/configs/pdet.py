@@ -16,8 +16,13 @@ class PDETConfig:
     noise_seed: int = 0
     time_seed: int = 0
     audit_steps: int = 8
+    # Optional finite experiment plan. This selects a NEW occurrence-keyed flow protocol.
+    order_plan: str | None = None
+    diagnostics: bool = False
 
     def validate(self) -> None:
+        if not self.enabled and (self.order_plan is not None or self.diagnostics):
+            raise ValueError("PDET order plans/diagnostics require pdet.enabled=true")
         for name in ("prompt_seed", "data_seed", "noise_seed", "time_seed"):
             value = getattr(self, name)
             if type(value) is not int or not 0 <= value < 2**32:
@@ -52,6 +57,7 @@ class PDETConfig:
             or cfg.eval_steps != 0
             or cfg.vlm_prompt_export_path is not None
             or cfg.vlm_prompt_init_path is None
+            or (self.order_plan is not None and cfg.dataset.episodes is not None)
             or type(cfg.seed) is not int
             or not 0 <= cfg.seed < 2**32
         ):
@@ -59,6 +65,14 @@ class PDETConfig:
                 "PDET requires seeded native VLM-only flow with imported P, no compile/PEFT/"
                 "priming/bridge, and a non-streaming dataset without augmentation or online evaluation"
             )
+        if self.order_plan is not None:
+            from lerobot.utils.pdet_order import load_plan
+
+            plan = load_plan(self.order_plan)
+            if plan["manifest"]["data_seed"] != self.data_seed:
+                raise ValueError("PDET D must match the fixed task/pool plan seed")
+            if plan["manifest"]["steps"] != cfg.steps:
+                raise ValueError("Order plan must cover exactly the configured training steps")
         if not cfg.resume:
             from lerobot.utils.prompt_initialization import read_initial_prompt
 

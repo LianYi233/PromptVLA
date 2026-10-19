@@ -7,6 +7,10 @@ frozen PI0.5 model for robotic manipulation. The current experiments study token
 count, initialization sensitivity, independent sources of training randomness,
 and the geometry of the prompt-to-action mapping on LIBERO.
 
+For the paired GPU0/1 repeat/completion queue and GPU2/3 fixed-task-order controls,
+see [PDET follow-up experiments](examples/analysis/README_pi05_pdet_followup.md).
+Both keep two GPUs per experiment, batch32 per GPU, and save only the full3000-step checkpoint.
+
 The default method trains **VLM prompts only**. The vision encoder, VLM backbone,
 action expert, action projections, and time-conditioning modules remain frozen.
 There are no action prompts, CABO, action priming, or conditioning bridge in this

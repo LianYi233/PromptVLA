@@ -106,6 +106,11 @@ def audit_runs(runs, *, repo_root=None, inputs_only=False):
     for (run_a, rank_a, a, rows_a), (run_b, rank_b, b, rows_b) in combinations(records, 2):
         if rank_a != rank_b:
             continue
+        if (
+            a.get("source_tree_sha256") and b.get("source_tree_sha256")
+            and a["source_tree_sha256"] != b["source_tree_sha256"]
+        ):
+            raise ValueError(f"Different on-disk training source hashes: {run_a} vs {run_b}")
         for key in (
             "protocol",
             "global_seed",

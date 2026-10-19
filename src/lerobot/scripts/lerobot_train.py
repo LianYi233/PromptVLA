@@ -916,6 +916,7 @@ def _train_single_stage(
         logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
 
     # create dataloader for offline training
+    training_dataset = dataset
     if not cfg.dataset.streaming:
         # All non-streaming (map-style) datasets use EpisodeAwareSampler.
         # The order is a pure function of (seed, epoch), so every rank independently produces the
@@ -931,7 +932,7 @@ def _train_single_stage(
             seed=cfg.pdet.data_seed if cfg.pdet.enabled else (cfg.seed if cfg.seed is not None else 0),
             absolute_to_relative_idx=dataset.absolute_to_relative_idx,
         )
-        if cfg.resume and step > 0:
+        if cfg.resume and step > 0 and cfg.pdet.order_plan is None:
             # The resume offset depends on the (num_processes, batch_size) that produced `step`, so
             # use the values recorded in the checkpoint (falling back to the current ones for older
             # ckpts that did not store them).
@@ -958,6 +959,11 @@ def _train_single_stage(
                     f"Resuming data order at epoch {sampler_state['epoch']}, "
                     f"sample {sampler_state['start_index']}"
                 )
+        if cfg.pdet.order_plan is not None:
+            from lerobot.utils.pdet_order import PlannedDataset, PlannedSampler, load_plan
+
+            sampler = PlannedSampler(load_plan(cfg.pdet.order_plan), start_step=step)
+            training_dataset = PlannedDataset(dataset)
     else:
         shuffle = True
         sampler = None
@@ -969,7 +975,7 @@ def _train_single_stage(
     # Worker startup must not consume the global RNG or follow D (D is sample order only).
     worker_generator = torch.Generator().manual_seed(cfg.seed) if cfg.pdet.enabled else None
     dataloader = torch.utils.data.DataLoader(
-        dataset,
+        training_dataset,
         num_workers=cfg.num_workers,
         batch_size=cfg.batch_size,
         shuffle=shuffle and not cfg.dataset.streaming,
@@ -1059,6 +1065,11 @@ def _train_single_stage(
                     splits, active_cfg, preprocessor, postprocessor, cfg.piper_eval, cfg.output_dir, device
                 ),
             )
+
+    if cfg.pdet.enabled and cfg.pdet.diagnostics and is_main_process:
+        from lerobot.utils.pdet import PromptUpdateMonitor
+
+        parameter_monitor = PromptUpdateMonitor(accelerator.unwrap_model(policy))
 
     def log_action_evaluation(completed_step):
         # All ranks participate in error propagation/synchronization; only rank 0 predicts.
@@ -1187,6 +1198,8 @@ def _train_single_stage(
         start_time = time.perf_counter()
         batch = next(dl_iter)
         sample_indices = batch.get("index") if pdet_streams is not None else None
+        # Capture identities before processor packing; never expose experiment keys to the model.
+        occurrence_ids = batch.pop("_pdet_occurrence_id", None)
         for cam_key in dataset.meta.camera_keys:
             if cam_key in batch and batch[cam_key].dtype == torch.uint8:
                 batch[cam_key] = batch[cam_key].to(dtype=torch.float32) / 255.0
@@ -1196,8 +1209,12 @@ def _train_single_stage(
         forward_kwargs = None
         if pdet_streams is not None:
 
-            def draw_flow(batch=batch, step=step, sample_indices=sample_indices):
-                return pdet_streams.draw(accelerator.unwrap_model(policy), batch, step, sample_indices)
+            def draw_flow(
+                batch=batch, step=step, sample_indices=sample_indices, occurrence_ids=occurrence_ids
+            ):
+                return pdet_streams.draw(
+                    accelerator.unwrap_model(policy), batch, step, sample_indices, occurrence_ids
+                )
 
             # Propagate audit I/O failures before any rank enters backward collectives.
             forward_kwargs = (
@@ -1225,8 +1242,11 @@ def _train_single_stage(
             forward_kwargs=forward_kwargs,
             parameter_monitor=(
                 parameter_monitor
-                if cfg.piper_eval.update_freq > 0
-                and ((step + 1) % cfg.piper_eval.update_freq == 0 or step + 1 == cfg.steps)
+                if (cfg.pdet.enabled and cfg.pdet.diagnostics)
+                or (
+                    cfg.piper_eval.update_freq > 0
+                    and ((step + 1) % cfg.piper_eval.update_freq == 0 or step + 1 == cfg.steps)
+                )
                 else None
             ),
         )
@@ -1280,7 +1300,9 @@ def _train_single_stage(
         ):
             log_action_evaluation(step)
 
-        if prompt_rank_monitor is not None and (step % cfg.prompt_rank.freq == 0 or step == cfg.steps):
+        if prompt_rank_monitor is not None and (
+            step % cfg.prompt_rank.freq == 0 or step == cfg.steps or step in cfg.prompt_rank.extra_steps
+        ):
             log_prompt_rank(step)
 
         if is_eval_step:

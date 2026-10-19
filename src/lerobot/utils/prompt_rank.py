@@ -287,7 +287,12 @@ class PromptRankMonitor:
 
     def _rows(self, policy, prompt, sample_index, timestep, autocast_context):
         with torch.enable_grad(), autocast_context():
-            velocity, _, probes, _ = self._probe_forward(policy, sample_index, timestep)
+            velocity, target, probes, valid = self._probe_forward(policy, sample_index, timestep)
+            if self.options.fixed_flow_loss:
+                errors = (velocity.detach().float() - target.float()).square()[valid]
+                self._last_probe_error = torch.stack(
+                    (errors.sum(), torch.tensor(errors.numel(), device=self.device, dtype=torch.float32))
+                )
             rows = []
             for index, probe in enumerate(probes):
                 (gradient,) = torch.autograd.grad(
@@ -303,6 +308,7 @@ class PromptRankMonitor:
         """Shard samples across DDP ranks, with a small collective after each forward/VJP set."""
         started = time.perf_counter()
         rows = []
+        loss_records = []
         with evaluation_rng(self.device, self.options.seed), isolated_prompt(policy) as prompt:
             world = accelerator.num_processes
             for start in range(0, len(self.samples), world):
@@ -317,6 +323,26 @@ class PromptRankMonitor:
                         ),
                     )
                     gathered = accelerator.gather(local)
+                    if self.options.fixed_flow_loss:
+                        local_error = (
+                            self._last_probe_error
+                            if sample_index < len(self.samples)
+                            else torch.zeros(2, device=self.device)
+                        )
+                        errors = accelerator.gather(local_error).reshape(world, 2)
+                        if accelerator.is_main_process:
+                            for rank, (total, count) in enumerate(errors.cpu().tolist()):
+                                if start + rank < len(self.samples):
+                                    identity = self.manifest["samples"][start + rank]
+                                    loss_records.append(
+                                        {
+                                            "sample_index": start + rank,
+                                            "time": timestep,
+                                            "task_index": identity.get("task_index", -1),
+                                            "squared_error_sum": total,
+                                            "valid_coordinates": int(count),
+                                        }
+                                    )
                     if accelerator.is_main_process:
                         valid_ranks = min(world, len(self.samples) - start)
                         rows.append(gathered[: valid_ranks * self.options.output_probes].cpu().numpy())
@@ -334,12 +360,23 @@ class PromptRankMonitor:
                 block = block.reshape(len(self.options.timesteps), count, self.options.output_probes, -1)
                 blocks.append(block.transpose(1, 0, 2, 3).reshape(-1, prompt.numel()))
                 offset += len(self.options.timesteps)
-            return self._save_step(policy, step, np.concatenate(blocks), time.perf_counter() - started)
+            return self._save_step(
+                policy, step, np.concatenate(blocks), time.perf_counter() - started, loss_records
+            )
 
         return collective_call(accelerator, save)
 
-    def _save_step(self, policy, step, rows, elapsed):
+    def _save_step(self, policy, step, rows, elapsed, loss_records=None):
         metrics, gram, eigenvalues, singular_values = tangent_spectrum(rows)
+        if loss_records:
+            metrics["fixed_training_probe_flow_mse"] = sum(
+                item["squared_error_sum"] for item in loss_records
+            ) / sum(item["valid_coordinates"] for item in loss_records)
+            for timestep in self.options.timesteps:
+                subset = [item for item in loss_records if item["time"] == timestep]
+                metrics[f"fixed_training_probe_flow_mse_t{timestep:g}"] = sum(
+                    item["squared_error_sum"] for item in subset
+                ) / sum(item["valid_coordinates"] for item in subset)
         metrics["probe_seconds"] = elapsed
         metrics["erank_fraction_of_ceiling"] = metrics["jacobian_erank"] / metrics["rank_ceiling"]
         record = {"step": int(step), **metrics}
@@ -355,6 +392,19 @@ class PromptRankMonitor:
             temporary, gram=gram, eigenvalues=eigenvalues, singular_values=singular_values, prompt=weights
         )
         temporary.replace(path)
+        if loss_records:
+            with (self.output_dir / "fixed_training_probe_loss.jsonl").open("a") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "step": step,
+                            "scope": "fixed training observations; NOT held-out validation",
+                            "samples": loss_records,
+                        },
+                        allow_nan=False,
+                    )
+                    + "\n"
+                )
         with (self.output_dir / "metrics.jsonl").open("a") as handle:
             handle.write(json.dumps(record, allow_nan=False) + "\n")
         csv_path = self.output_dir / "metrics.csv"
