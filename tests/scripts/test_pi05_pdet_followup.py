@@ -141,12 +141,26 @@ def test_full_realized_trace_audit_detects_late_noise_corruption(tmp_path):
         PDETStreams(cfg, policy, accelerator())
     assert audit_order(runs)["audit"] == "passed"
     assert Path(summarize(runs[0])["output"], "coverage.csv").is_file()
+    # A startup-only patch still changes provenance: explicit inputs-only mode
+    # can check the trace, but must never certify different source as equivalent.
+    for rank in (0, 1):
+        manifest_path = runs[1] / f"pdet/manifest-rank{rank}.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["git_commit"] = "a" * 40
+        manifest["source_tree_sha256"] = "b" * 64
+        manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="isolation failed"):
+        audit_order(runs)
+    report = audit_order(runs, inputs_only=True)
+    assert report["audit"] == "inputs_only_passed"
+    assert report["code_revision"]["status"] == "not_verified"
+    assert "NOT verified" in report["scope"]
     path = runs[1] / "pdet/inputs-rank1.jsonl"
     records = [json.loads(line) for line in path.read_text().splitlines()]
     records[30]["occurrence_noise_sha256"][0] = "corrupt"
     path.write_text("\n".join(json.dumps(row) for row in records) + "\n")
     with pytest.raises(ValueError, match="isolation failed"):
-        audit_order(runs)
+        audit_order(runs, inputs_only=True)
 
 
 def test_plan_dataset_identity_and_prompt_update_monitor():

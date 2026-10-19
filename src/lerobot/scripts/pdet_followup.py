@@ -71,11 +71,12 @@ def read_run(run):
     return manifest, [rows[key] for key in sorted(rows)]
 
 
-def audit_order(runs):
+def audit_order(runs, *, inputs_only=False):
     if len(runs) < 2:
         raise ValueError("Order audit needs at least two runs")
     reference = None
     reports = []
+    code_records = []
     for run in runs:
         manifest, rows = read_run(run)
         if manifest["protocol"] != FLOW_PROTOCOL:
@@ -124,10 +125,12 @@ def audit_order(runs):
                 "versions",
                 "cuda",
                 "recipe",
-                "git_commit",
-                "source_tree_sha256",
             )
         }
+        code = {key: manifest[key] for key in ("git_commit", "source_tree_sha256")}
+        if not inputs_only:
+            invariant.update(code)
+        code_records.append({"run": str(run), **code})
         invariant["factors"] = {
             key: value for key, value in manifest["factors"].items() if key != "order_plan"
         }
@@ -145,8 +148,17 @@ def audit_order(runs):
             {"run": str(run), "occurrences": len(occurrences), "within_seed": plan["manifest"]["within_seed"]}
         )
     return {
-        "audit": "passed",
-        "scope": "All realized task slots and occurrence-bound E/T; not numerical determinism",
+        "audit": "inputs_only_passed" if inputs_only else "passed",
+        "scope": (
+            "All realized task slots and occurrence-bound E/T; "
+            "code equivalence NOT verified; not numerical determinism"
+            if inputs_only else
+            "All realized task slots and occurrence-bound E/T; not numerical determinism"
+        ),
+        "code_revision": {
+            "status": "not_verified" if inputs_only else "same_recorded_commit_and_source",
+            "runs": code_records,
+        },
         "runs": reports,
     }
 
@@ -285,7 +297,12 @@ def main():
     prepare.add_argument("--steps", type=int, default=3000)
     prepare.add_argument("--batch-size", type=int, default=32)
     prepare.add_argument("--world-size", type=int, default=2)
-    sub.add_parser("audit-order").add_argument("runs", type=Path, nargs="+")
+    order = sub.add_parser("audit-order")
+    order.add_argument("runs", type=Path, nargs="+")
+    order.add_argument(
+        "--inputs-only", action="store_true",
+        help="Check all realized inputs/recipe; report source-code equivalence as NOT verified",
+    )
     sub.add_parser("summarize").add_argument("runs", type=Path, nargs="+")
     compare = sub.add_parser("compare-inputs")
     compare.add_argument("original", type=Path)
@@ -302,7 +319,7 @@ def main():
             args.data_seed,
         )
     elif args.command == "audit-order":
-        result = audit_order(args.runs)
+        result = audit_order(args.runs, inputs_only=args.inputs_only)
     elif args.command == "compare-inputs":
         result = compare_inputs(args.original, args.repeat)
     else:

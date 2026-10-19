@@ -46,6 +46,53 @@ silently skipped. After part of a queue succeeds, select only remaining
 `PDET_CASES`/`WITHIN_SEEDS`. A directory from a failed run must be archived to a
 new name before a from-scratch retry. A later full repeat can use `REPEAT_ID=2`.
 
+### Retry W1 after an output-directory startup race
+
+The training entry point now waits for **every rank to finish config validation**
+before W&B or training can create the run directory. Process-group construction
+alone was not that synchronization point: a faster rank could create the W&B
+directory before a slower rank checked it. Existing directories are still rejected;
+do not bypass the guard or set `resume=true` without a complete checkpoint.
+
+If another queue is still running, leave its checkout unchanged. Fetch the fix and
+create a separate checkout for the retry (choose a new path if it already exists):
+
+```bash
+cd /home/wyn/VLAA/PromptVLA
+git fetch origin main
+git worktree add --detach /home/wyn/VLAA/PromptVLA-startup-fix origin/main
+cd /home/wyn/VLAA/PromptVLA-startup-fix
+
+# Only W1 failed; preserve both the completed W0 and the failed W1 directory/log.
+# rep2 is a new output name, not a change to any random seed.
+env -u PRETRAINED_PATH -u RUN_NAME -u RUN_PREFIX -u VLM_PROMPT_TOKENS \
+    -u PROMPT_INIT_PATH -u PROMPT_EXPORT_PATH -u PROMPT_EXPORT_REFERENCE -u PDET_CASES \
+GPU_IDS=2,3 MAIN_PROCESS_PORT=29542 REPEAT_ID=2 WITHIN_SEEDS="1" \
+PLAN_DIR=/data1/wyn/prompt-work/pdet-order-rep1 \
+bash examples/training/train_pi05_pdet_followup.sh order \
+  --wandb.enable=true --wandb.project=prompt-learning \
+  --wandb.mode=online --wandb.disable_artifact=true
+```
+
+This reuses the original W1 plan and P1 initialization. With final-only saving,
+the retry starts at step0. The new output is
+`pi05-taskfixed-rep2-W1-base-vlm2-P1-D0-E1-T1`.
+
+Completed W0 and retried W1 record different source hashes. The strict order audit
+continues to reject that mismatch. To verify the full realized input isolation
+while explicitly reporting code equivalence as **not verified**, use:
+
+```bash
+python -m lerobot.scripts.pdet_followup audit-order --inputs-only \
+  /data1/wyn/chkpt/2601-lerobot/PromptVLA/pi05-taskfixed-rep1-W0-base-vlm2-P1-D0-E1-T1 \
+  /data1/wyn/chkpt/2601-lerobot/PromptVLA/pi05-taskfixed-rep2-W1-base-vlm2-P1-D0-E1-T1
+```
+
+This mode still enforces the complete task schedule, instance pool, prompt,
+per-occurrence noise/time, recipe and runtime versions. It does not certify source
+equivalence or numerical determinism. For a same-source comparison, repeat W0
+from the fixed checkout with `REPEAT_ID=2 WITHIN_SEEDS="0"` and audit the rep2 pair.
+
 ## What the two queues measure
 
 The repeat queue retains `pdet-step-rank-v1`: original sampler and flow draw math,

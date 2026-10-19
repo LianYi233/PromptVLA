@@ -289,7 +289,7 @@ def test_one_command_runs_next_action_then_flow_with_fresh_stage_configs(monkeyp
     assert cfg.policy.pretrained_path == expected_model_dir
     assert cfg.policy.pretrained_revision is None
     assert not cfg.output_dir.exists()
-    assert accelerator.wait_calls == 1
+    assert accelerator.wait_calls == 2  # Startup validation, then the stage transition.
     assert accelerator.free_memory_calls == 1
     assert accelerator.end_training_calls == 1
 

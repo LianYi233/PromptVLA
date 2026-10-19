@@ -595,6 +595,11 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
     accelerator = _make_training_accelerator(cfg, accelerator)
 
     try:
+        # Process-group construction is not a barrier. In particular, rank 0 must
+        # not let WandBLogger create output_dir while a slower rank is still in
+        # cfg.validate() checking that a fresh run's directory does not exist.
+        accelerator.wait_for_everyone()
+
         if (
             cfg.prompt_rank.freq > 0
             or cfg.pdet.enabled
