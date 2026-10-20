@@ -14,6 +14,7 @@ import torch
 
 PLAN_PROTOCOL = "pdet-fixed-task-slots-v1"
 FLOW_PROTOCOL = "pdet-occurrence-flow-v1"
+SLOT_FLOW_PROTOCOL = "pdet-slot-flow-v1"
 OCCURRENCE_KEY = "_pdet_occurrence_id"
 META_COLUMNS = ("index", "task_index", "episode_index", "frame_index", "phase_bin", "gripper_change")
 

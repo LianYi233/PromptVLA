@@ -25,19 +25,28 @@ def stream_seed(factor: str, seed: int, step: int, rank: int) -> int:
     return int.from_bytes(hashlib.sha256(payload).digest()[:8], "little") & ((1 << 63) - 1)
 
 
-def sample_flow(policy, batch, config: PDETConfig, step: int, rank: int, occurrences=None) -> dict:
+def sample_flow(policy, batch, config: PDETConfig, step: int, rank: int, occurrences=None, *, slot_ids=None) -> dict:
     actions = policy.prepare_action(batch)
     if config.order_plan is not None:
         from lerobot.utils.pdet_order import FLOW_PROTOCOL
 
         if occurrences is None or len(occurrences) != len(actions):
             raise ValueError("Occurrence-keyed flow requires one immutable occurrence ID per sample")
+        if config.flow_binding not in ("occurrence", "slot"):
+            raise ValueError("Unknown flow binding")
+        keys = occurrences if config.flow_binding == "occurrence" else slot_ids
+        if keys is None or len(keys) != len(actions):
+            raise ValueError("Slot-bound flow requires one global slot ID per sample")
+        keys = torch.as_tensor(keys).cpu()
+        if keys.ndim != 1 or keys.dtype not in (torch.int32, torch.int64) or (keys < 0).any():
+            raise ValueError("Flow bank keys must be nonnegative integer IDs")
         noise_rows, time_rows = [], []
-        # CPU draws make keys independent of GPU/rank/batch position. All generator state is local.
-        for occurrence in torch.as_tensor(occurrences).cpu().tolist():
+        # Keep the original occurrence namespace and CPU draw math for BOTH bindings.
+        # A binding intervention changes only the bank key assigned to this sample.
+        for bank_key in keys.tolist():
 
-            def seed_for(factor, seed, occurrence=occurrence):
-                payload = f"{FLOW_PROTOCOL}:{factor}:{seed}:{int(occurrence)}".encode()
+            def seed_for(factor, seed, bank_key=bank_key):
+                payload = f"{FLOW_PROTOCOL}:{factor}:{seed}:{int(bank_key)}".encode()
                 return int.from_bytes(hashlib.sha256(payload).digest()[:8], "little") & ((1 << 63) - 1)
 
             generator = torch.Generator().manual_seed(seed_for("E", config.noise_seed))
@@ -138,7 +147,12 @@ class PDETStreams:
             self.frames = read_frame_metadata(cfg.dataset.root)
         protocol = PROTOCOL
         if cfg.pdet.order_plan is not None:
-            from lerobot.utils.pdet_order import FLOW_PROTOCOL, load_plan, validate_plan_dataset
+            from lerobot.utils.pdet_order import (
+                FLOW_PROTOCOL,
+                SLOT_FLOW_PROTOCOL,
+                load_plan,
+                validate_plan_dataset,
+            )
 
             self.plan = load_plan(cfg.pdet.order_plan)
             validate_plan_dataset(
@@ -148,7 +162,7 @@ class PDETStreams:
                 batch_size=cfg.batch_size,
                 world_size=accelerator.num_processes,
             )
-            protocol = FLOW_PROTOCOL
+            protocol = FLOW_PROTOCOL if cfg.pdet.flow_binding == "occurrence" else SLOT_FLOW_PROTOCOL
         invariants = {
             "protocol": protocol,
             "factors": asdict(cfg.pdet),
@@ -160,6 +174,7 @@ class PDETStreams:
         }
         if self.plan is not None:
             invariants["order_plan"] = self.plan["manifest"]
+            invariants["flow_key_namespace"] = FLOW_PROTOCOL
         if self.frames is not None:
             from lerobot.utils.pdet_order import arrays_hash
 
@@ -194,21 +209,29 @@ class PDETStreams:
                 handle.write("\n")
 
     def draw(self, policy, batch, step: int, indices, occurrences=None) -> dict:
-        draws = sample_flow(policy, batch, self.config, step, self.rank, occurrences)
+        slot_ids = None
+        if self.plan is not None:
+            manifest = self.plan["manifest"]
+            if occurrences is None or not 0 <= step < manifest["steps"]:
+                raise ValueError("Finite plan requires valid step and occurrence IDs")
+            occurrence_ids = torch.as_tensor(occurrences).cpu().reshape(-1).tolist()
+            start = (step * manifest["world_size"] + self.rank) * manifest["batch_size"]
+            slot_ids = list(range(start, start + manifest["batch_size"]))
+            expected = self.plan["order"][start : start + manifest["batch_size"]].tolist()
+            if occurrence_ids != expected:
+                raise ValueError("Actual DDP task-slot assignment differs from the recorded plan")
+            actual_indices = torch.as_tensor(indices).cpu().reshape(-1).tolist()
+            if self.plan["index"][occurrence_ids].tolist() != actual_indices:
+                raise ValueError("Occurrence IDs no longer refer to the recorded frames")
+        draws = sample_flow(policy, batch, self.config, step, self.rank, occurrences, slot_ids=slot_ids)
         if step < self.config.audit_steps:
             record = audit_record(indices, draws, step=step, rank=self.rank)
             if self.frames is not None:
                 for key in ("task_index", "episode_index", "frame_index", "phase_bin", "gripper_change"):
                     record[key] = self.frames[key][record["sample_ids"]].tolist()
             if self.plan is not None:
-                occurrence_ids = torch.as_tensor(occurrences).cpu().reshape(-1).tolist()
-                start = (step * self.plan["manifest"]["world_size"] + self.rank) * len(occurrence_ids)
-                expected = self.plan["order"][start : start + len(occurrence_ids)].tolist()
-                if occurrence_ids != expected:
-                    raise ValueError("Actual DDP task-slot assignment differs from the recorded plan")
-                if self.plan["index"][occurrence_ids].tolist() != record["sample_ids"]:
-                    raise ValueError("Occurrence IDs no longer refer to the recorded frames")
                 record["occurrence_ids"] = occurrence_ids
+                record["flow_key_ids"] = occurrence_ids if self.config.flow_binding == "occurrence" else slot_ids
                 # Transfer each tensor once; per-occurrence hashes verify E/T after reordering.
                 cpu_draws = {key: value.detach().cpu() for key, value in draws.items()}
                 for key, value in cpu_draws.items():

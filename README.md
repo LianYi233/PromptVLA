@@ -11,6 +11,9 @@ For the paired GPU0/1 repeat/completion queue and GPU2/3 fixed-task-order contro
 see [PDET follow-up experiments](examples/analysis/README_pi05_pdet_followup.md).
 Both keep two GPUs per experiment, batch32 per GPU, and save only the full3000-step checkpoint.
 
+For the next same-bank **sample order x noise binding** factorial (eight runs,
+two concurrent two-GPU queues), see [order/binding controls](examples/analysis/README_pi05_order_binding.md).
+
 The default method trains **VLM prompts only**. The vision encoder, VLM backbone,
 action expert, action projections, and time-conditioning modules remain frozen.
 There are no action prompts, CABO, action priming, or conditioning bridge in this

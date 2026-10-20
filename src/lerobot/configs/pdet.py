@@ -18,9 +18,16 @@ class PDETConfig:
     audit_steps: int = 8
     # Optional finite experiment plan. This selects a NEW occurrence-keyed flow protocol.
     order_plan: str | None = None
+    # For finite plans only: both bindings draw from the SAME indexed CPU bank.
+    # "slot" keys by global batch slot; "occurrence" keys by immutable sample use.
+    flow_binding: str = "occurrence"
     diagnostics: bool = False
 
     def validate(self) -> None:
+        if self.flow_binding not in ("occurrence", "slot"):
+            raise ValueError("pdet.flow_binding must be occurrence or slot")
+        if self.flow_binding == "slot" and self.order_plan is None:
+            raise ValueError("Slot-bound flow requires a finite pdet.order_plan")
         if not self.enabled and (self.order_plan is not None or self.diagnostics):
             raise ValueError("PDET order plans/diagnostics require pdet.enabled=true")
         for name in ("prompt_seed", "data_seed", "noise_seed", "time_seed"):
