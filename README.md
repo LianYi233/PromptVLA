@@ -21,6 +21,8 @@ experimental recipe. For PI0.5, N prompt tokens contain N × 2048 trainable para
 This reduces trainable parameters and per-task adaptation storage; inference still
 requires the full backbone.
 
+FrameSkip 风格课程实验：见 [评分、双卡训练与评估说明](examples/analysis/README_frameskip_curriculum.md)。固定 P1/D0、VLM token=2，比较 U/R/S/C 四种安排与两个 ε/t bank；S/C 严格共享样本使用实例和噪声。
+
 ## Project and implementation
 
 This independent repository continues the `vlm-only` work from
