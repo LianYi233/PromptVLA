@@ -49,8 +49,10 @@ export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
 CUDA_VISIBLE_DEVICES=0 python -m lerobot.scripts.frameskip_scores \
   --output /data1/wyn/prompt-work/frameskip-r1 --pilot-only
 
-# Full scoring reuses the pilot's cached visual deltas.
-CUDA_VISIBLE_DEVICES=0 python -m lerobot.scripts.frameskip_scores \
+# Four-GPU scoring reuses completed episodes from the pilot or an interrupted single-GPU run.
+# Stop the old scorer with Ctrl+C before restarting against the same output directory.
+python -m lerobot.scripts.frameskip_scores \
+  --gpu-ids 0,1,2,3 --batch-size 32 \
   --output /data1/wyn/prompt-work/frameskip-r1
 
 python -m lerobot.scripts.frameskip_experiment prepare \
@@ -60,7 +62,22 @@ python -m lerobot.scripts.frameskip_experiment prepare \
 
 Defaults: dataset `/home/wyn/datasets/libero`, source `/home/wyn/models/lerobot/pi05_libero_base`. Two cameras are inferred from dataset metadata; override explicitly with `--cameras observation.images.image observation.images.image2`. `--batch-size` only affects offline vision extraction, not training. Scoring does not instantiate the 4B policy/LLM/action expert. All saved vision keys must load strictly; missing weights never fall back to random initialization.
 
-Run scoring/preparation **once before starting the two queues**. Do not concurrently write the same vision cache, modify score code/config, or regenerate plans during a run. A cache source/config change is rejected; use a new scoring directory if deliberately changing the recipe. Plot labels use camera0/camera1; the exact camera-key mapping is recorded in the score manifest. Look for camera shake/near-static denominator artifacts, meaningful action/gripper neighborhoods, and coverage across time. All raw frames remain accessible to training regardless of selection.
+`--gpu-ids` starts independent processes (one frozen vision tower per GPU, no DDP/NCCL). IDs are passed directly as each worker's `CUDA_VISIBLE_DEVICES`; they are not relative indices into an inherited visibility mask. Complete episodes are assigned deterministically with frame-count balancing, so adjacent-frame differences never cross a shard boundary. Workers write disjoint episode caches. Only after **all** workers succeed does the parent validate coverage/checksums and merge `scores.npz`, `episodes.csv`, and previews on CPU. A worker failure stops the other workers and prevents the merge. Completed episode caches survive Ctrl+C/failures; the incomplete episode is recomputed. Re-run the same command to continue. An exclusive output lock prevents two new scorers from writing the same output; the old single-GPU version has no such lock, so stop it first.
+
+The terminal shows one aggregate frame-progress/ETA bar. Worker details go to `scoring_logs/parallel-*/worker-*.log`. ETA is useful after model loading and the initial cache scan; CPU decoding and storage bandwidth can limit speedup, so four GPUs do not guarantee exactly one quarter of the wall time. Consecutive frames now share a PyAV decode call, and one CPU thread prefetches the next batch during inference. The episode timestamp offsets, two cameras, full frame coverage, float32 encoder and scoring formula are unchanged. Each worker checks its first uncached batch against the original per-frame reader pixel-for-pixel before using batch decoding. If that check fails, diagnose the input or explicitly retry with `--decode-mode frame`. Keep the original batch size (default32) when continuing an experiment; GPU numerical determinism is not implied.
+
+The reviewed `c15245d` single-GPU cache is compatible: its source/config/data/version checks and episode checksums still apply. Its immutable recipe manifest is retained to preserve existing score/plan identity; **actual new execution code hashes**, decode mode, batch size and shard/device settings are recorded separately in `scoring_logs/execution-*.json`. Unknown code hashes or changed source/config/data are rejected, not silently reused.
+
+If extraction completed but merging/plotting was interrupted, no GPU recomputation is necessary:
+
+```bash
+python -m lerobot.scripts.frameskip_scores --merge-only \
+  --output /data1/wyn/prompt-work/frameskip-r1
+```
+
+This verifies every required episode and refuses missing or corrupted caches. The original single-GPU command still works and now also uses batch decoding by default.
+
+Run scoring/preparation **once before starting the two training queues**. Do not start a second independent scoring command against the same output, modify score code/config, or regenerate plans during a run. A cache source/config change is rejected; use a new scoring directory if deliberately changing the recipe. Plot labels use camera0/camera1; the exact camera-key mapping is recorded in the score manifest. Look for camera shake/near-static denominator artifacts, meaningful action/gripper neighborhoods, and coverage across time. All raw frames remain accessible to training regardless of selection.
 
 ## 2. Run both queues
 
@@ -121,9 +138,9 @@ Compare S−R to test score-informed selection, C−S to test temporal schedulin
 ## Local checks
 
 ```bash
-uv run pytest tests/scripts/test_frameskip_curriculum.py -q
+uv run pytest tests/scripts/test_frameskip_curriculum.py tests/scripts/test_frameskip_parallel.py -q
 bash -n examples/training/train_pi05_frameskip_curriculum.sh
 bash -n run_eval_libero_frameskip.sh
 ```
 
-CPU tests exercise scoring edge cases, exact quotas, schedule construction, actual Accelerate batch sharding/resume offsets, original-chunk delegation, the actual PDET flow generator and full-trace corruption detection. The real local LIBERO decoding, A100 vision extraction, distributed model training and rollout evaluation must be smoke-tested on the data server; they cannot be validated by the CPU fixtures alone.
+CPU tests exercise scoring edge cases, exact quotas, schedule construction, actual Accelerate batch sharding/resume offsets, original-chunk delegation, the actual PDET flow generator and full-trace corruption detection. Parallel-scoring checks cover deterministic episode partitioning, concurrent manifest creation, legacy cache compatibility, atomic cache writes, four-process supervision/cleanup, missing-shard rejection, resume/CPU merging and identical final score arrays. A real encoded two-camera PyAV fixture checks batch-vs-frame pixels with shared-video episode offsets and singleton batches. The real local LIBERO decoding, A100 vision extraction, distributed model training and rollout evaluation must be smoke-tested on the data server; they cannot be validated by the CPU fixtures alone.

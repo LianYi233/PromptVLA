@@ -5,6 +5,10 @@ import csv
 import hashlib
 import json
 import os
+import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 
@@ -130,7 +134,54 @@ def load_vision(source, device):
     return model, resolution, digest.hexdigest()
 
 
-def extract_episode(dataset, indices, cameras, model, resolution, device, batch_size):
+def read_frame_batch(dataset, indices, cameras, decode_mode="batch"):
+    """Reuse LeRobot's timestamps/episode offsets and PyAV decoder for a whole batch."""
+    import torch
+
+    reader = getattr(dataset, "reader", None)
+    if decode_mode == "batch" and reader is not None and all(k in dataset.meta.video_keys for k in cameras):
+        if dataset.delta_timestamps is not None or dataset.image_transforms is not None:
+            raise ValueError(
+                "Offline batch decoding requires raw single-frame observations without transforms"
+            )
+        if any(k in dataset.meta.depth_keys for k in cameras):
+            raise ValueError("FrameSkip requires two RGB cameras")
+        rows = dataset.hf_dataset.select_columns(["index", "episode_index", "timestamp"])[indices.tolist()]
+        ids = torch.as_tensor(rows["index"]).reshape(-1)
+        episodes = torch.as_tensor(rows["episode_index"]).reshape(-1)
+        timestamps = torch.as_tensor(rows["timestamp"]).reshape(-1)
+        if (
+            ids.tolist() != indices.tolist()
+            or len(episodes.unique()) != 1
+            or not torch.isfinite(timestamps).all()
+        ):
+            raise ValueError("Batch decoding changed frame identities or crossed an episode")
+        images = reader._query_videos({key: timestamps.tolist() for key in cameras}, int(episodes[0]))
+        return {
+            "index": ids,
+            **{key: images[key].unsqueeze(0) if images[key].ndim == 3 else images[key] for key in cameras},
+        }
+    rows = [dataset[int(index)] for index in indices]
+    return {
+        "index": torch.as_tensor([int(row["index"]) for row in rows]),
+        **{key: torch.stack([row[key] for row in rows]) for key in cameras},
+    }
+
+
+def verify_batch_decoding(dataset, indices, cameras):
+    """Fail closed if the fast reader differs from the existing per-frame pixel path."""
+    import torch
+
+    fast = read_frame_batch(dataset, indices, cameras, "batch")
+    slow = read_frame_batch(dataset, indices, cameras, "frame")
+    for key in ("index", *cameras):
+        if not torch.equal(fast[key], slow[key]):
+            raise ValueError(f"Batch/frame decoding mismatch for {key}; rerun with --decode-mode frame")
+
+
+def extract_episode(
+    dataset, indices, cameras, model, resolution, device, batch_size, decode_mode="batch", progress=None
+):
     import torch
     import torch.nn.functional as F  # noqa: N812
 
@@ -138,15 +189,28 @@ def extract_episode(dataset, indices, cameras, model, resolution, device, batch_
 
     result = np.zeros((len(indices), 2), dtype=np.float32)
     previous = [None, None]
-    with torch.inference_mode():
+    # One reader thread overlaps CPU video decoding with GPU inference. No DataLoader fork.
+    with torch.inference_mode(), ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(read_frame_batch, dataset, indices[:batch_size], cameras, decode_mode)
         for start in range(0, len(indices), batch_size):
             positions = indices[start : start + batch_size]
-            rows = [dataset[int(index)] for index in positions]
-            if [int(row["index"]) for row in rows] != positions.tolist():
+            batch = future.result()
+            stop = start + len(positions)
+            if stop < len(indices):
+                future = pool.submit(
+                    read_frame_batch, dataset, indices[stop : stop + batch_size], cameras, decode_mode
+                )
+            if batch["index"].tolist() != positions.tolist():
                 raise ValueError("Dataset decoder changed global frame identities")
             for camera, key in enumerate(cameras):
-                images = torch.stack([row[key] for row in rows]).to(device, dtype=torch.float32)
-                if images.ndim != 4 or images.shape[1] != 3 or images.min() < 0 or images.max() > 1:
+                images = batch[key].to(device, dtype=torch.float32)
+                if (
+                    images.ndim != 4
+                    or images.shape[0] != len(positions)
+                    or images.shape[1] != 3
+                    or images.min() < 0
+                    or images.max() > 1
+                ):
                     raise ValueError(f"Expected [N,3,H,W] images in [0,1]: {key}")
                 images = images.permute(0, 2, 3, 1)
                 if tuple(images.shape[1:3]) != tuple(resolution):
@@ -158,10 +222,10 @@ def extract_episode(dataset, indices, cameras, model, resolution, device, batch_
                     raise ValueError("Nonfinite frozen visual features")
                 before = features[:1] if previous[camera] is None else previous[camera]
                 joined = torch.cat([before, features])
-                result[start : start + len(rows), camera] = (
-                    (joined[1:] - joined[:-1]).norm(dim=-1).cpu().numpy()
-                )
+                result[start:stop, camera] = (joined[1:] - joined[:-1]).norm(dim=-1).cpu().numpy()
                 previous[camera] = features[-1:]
+            if progress is not None:
+                progress(len(positions))
     return result
 
 
@@ -194,14 +258,121 @@ def plot_episode(path, scores, title):
     plt.close(fig)
 
 
-def score_dataset(args):
+# c15245d: identical score/encoder recipe before parallel execution and batch decoding.
+# Accept only this reviewed predecessor, never arbitrary changed scoring code.
+COMPATIBLE_CACHE_CODE = {"96c6487673626e1cd72ac975abd1121e0ff9e36defbe7dc446dec22e58c2b256"}
+
+
+def scoring_code_hash():
+    files = [
+        Path(__file__),
+        Path(__file__).with_name("frameskip_parallel.py"),
+        Path(__file__).parents[1] / "utils/frameskip_curriculum.py",
+    ]
+    return hashlib.sha256(b"".join(p.read_bytes() for p in files)).hexdigest()
+
+
+@contextmanager
+def output_lock(path):
+    import fcntl
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as handle:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError(f"Another scoring process owns {path}; stop it before restarting") from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+@contextmanager
+def atomic_file(path, mode="w"):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(name)
+    try:
+        with os.fdopen(fd, mode) as handle:
+            yield handle
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def write_json(path, value):
+    with atomic_file(path) as handle:
+        json.dump(value, handle, indent=2)
+
+
+def ensure_cache_manifest(cache, expected):
+    """Keep the cache recipe immutable; actual execution provenance is recorded separately."""
+    import fcntl
+
+    cache.mkdir(parents=True, exist_ok=True)
+    marker = cache / "manifest.json"
+    with (cache / ".manifest.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if marker.exists():
+            saved = json.loads(marker.read_text())
+            accepted = COMPATIBLE_CACHE_CODE | {expected["scoring_code_sha256"]}
+            if saved.get("scoring_code_sha256") not in accepted or {
+                k: v for k, v in saved.items() if k != "scoring_code_sha256"
+            } != {k: v for k, v in expected.items() if k != "scoring_code_sha256"}:
+                raise ValueError(
+                    "Vision cache source/config/data changed; use a new scoring output directory"
+                )
+            return saved
+        if any(cache.glob("episode-*.npz")):
+            raise ValueError("Episode caches exist without their manifest; cannot establish provenance")
+        write_json(marker, expected)
+        return expected
+
+
+def partition_episodes(episodes, count):
+    """Deterministic longest-first balancing, independent of which caches already exist."""
+    import heapq
+
+    if count < 1:
+        raise ValueError("Shard count must be positive")
+    groups = [[] for _ in range(count)]
+    loads = [(0, i) for i in range(count)]
+    heapq.heapify(loads)
+    for left, right in sorted(episodes, key=lambda pair: (-(pair[1] - pair[0]), pair[0])):
+        load, shard = heapq.heappop(loads)
+        groups[shard].append((left, right))
+        heapq.heappush(loads, (load + right - left, shard))
+    return [sorted(group) for group in groups]
+
+
+def load_delta(path, length):
+    with np.load(path, allow_pickle=False) as archive:
+        delta = archive["visual_delta"]
+        if (
+            delta.shape != (length, 2)
+            or delta.dtype != np.float32
+            or not np.isfinite(delta).all()
+            or np.any(delta < 0)
+            or np.any(delta[0] != 0)
+            or arrays_hash({"visual_delta": delta}) != str(archive["sha256"])
+        ):
+            raise ValueError(f"Corrupted cached visual deltas: {path}")
+    return delta
+
+
+def write_delta(path, delta):
+    with atomic_file(path, "wb") as handle:
+        np.savez_compressed(handle, visual_delta=delta, sha256=arrays_hash({"visual_delta": delta}))
+
+
+def scoring_context(args):
     import torch
-    from tqdm import tqdm
 
     # Local scoring must not download a model, tokenizer or dataset implicitly.
     os.environ["HF_HUB_OFFLINE"] = "1"
     os.environ["HF_DATASETS_OFFLINE"] = "1"
-    from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
     config = ScoreConfig()
     root, output = args.dataset_root, args.output
@@ -219,10 +390,18 @@ def score_dataset(args):
     stats = json.loads((root / "meta/stats.json").read_text())["action"]
     low, high = np.asarray(stats["q01"])[:6], np.asarray(stats["q99"])[:6]
     threshold = gripper_threshold(actions, args.gripper_threshold)
-    model, resolution, weight_hash = load_vision(args.source, args.device)
+    cache = output / "vision_cache"
+    marker = cache / "manifest.json"
+    model = None
+    if marker.exists():
+        saved = json.loads(marker.read_text())
+        resolution, weight_hash = saved["resolution"], saved["vision_weights_sha256"]
+    elif args.merge_only:
+        raise FileNotFoundError(f"No vision cache manifest: {marker}")
+    else:
+        model, resolution, weight_hash = load_vision(args.source, args.device)
     # File inventory identifies local video changes cheaply; this is not a video-content hash.
     videos = file_inventory(root, sorted((root / "videos").rglob("*")))
-    source_files = [Path(__file__), Path(__file__).parents[1] / "utils/frameskip_curriculum.py"]
     provenance = {
         "config": asdict(config),
         "gripper_threshold": threshold,
@@ -239,23 +418,18 @@ def score_dataset(args):
         "encoder": "PI05 frozen SigLIP last_hidden_state mean pooled, L2 normalized, float32 eager",
         "video_inventory_sha256": hashlib.sha256(json.dumps(videos).encode()).hexdigest(),
         "video_identity_scope": "relative paths/sizes/mtime only, NOT full video content hashes",
-        "scoring_code_sha256": hashlib.sha256(b"".join(p.read_bytes() for p in source_files)).hexdigest(),
+        "scoring_code_sha256": scoring_code_hash(),
         "torch": torch.__version__,
         "numpy": np.__version__,
     }
     provenance = json.loads(json.dumps(provenance))
     cache_identity = {**provenance, "dataset_metadata_sha256": arrays_hash(metadata)}
-    output.mkdir(parents=True, exist_ok=True)
-    cache = output / "vision_cache"
-    cache.mkdir(exist_ok=True)
-    marker = cache / "manifest.json"
-    if marker.exists():
-        if json.loads(marker.read_text()) != cache_identity:
-            raise ValueError("Vision cache source/config/data changed; use a new scoring output directory")
-    else:
-        with marker.open("x") as handle:
-            json.dump(cache_identity, handle, indent=2)
-    edges = np.r_[0, np.flatnonzero(np.diff(metadata["episode_index"])) + 1, len(actions)]
+    provenance = ensure_cache_manifest(cache, cache_identity)
+    return metadata, actions, cameras, low, high, threshold, config, provenance, model
+
+
+def episode_selection(metadata, pilot_only):
+    edges = np.r_[0, np.flatnonzero(np.diff(metadata["episode_index"])) + 1, len(metadata["index"])]
     episodes = list(zip(edges[:-1], edges[1:], strict=True))
     pilot = set()
     for task in np.unique(metadata["task_index"]):
@@ -264,28 +438,97 @@ def score_dataset(args):
         ]
         rng = np.random.default_rng(np.random.SeedSequence([2026, int(task)]))
         pilot.update(rng.choice(candidates, min(2, len(candidates)), replace=False).tolist())
-    dataset = LeRobotDataset(args.repo_id, root=root, video_backend="pyav")
+    selected = [(a, b) for a, b in episodes if not pilot_only or metadata["episode_index"][a] in pilot]
+    return selected, pilot
+
+
+def score_dataset(args):
+    from tqdm import tqdm
+
+    metadata, actions, cameras, low, high, threshold, config, provenance, model = scoring_context(args)
+    selected, pilot = episode_selection(metadata, args.pilot_only)
+    assigned = partition_episodes(selected, args.num_shards)[args.shard_index] if args.worker else selected
+    cache, output = args.output / "vision_cache", args.output
+    runtime = {
+        "execution_code_sha256": scoring_code_hash(),
+        "cache_recipe_code_sha256": provenance["scoring_code_sha256"],
+        "decode_mode": args.decode_mode,
+        "batch_size": args.batch_size,
+        "visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES"),
+        "device": args.device,
+        "num_shards": args.num_shards,
+        "shard_index": args.shard_index,
+        "merge_only": args.merge_only,
+        "pilot_only": args.pilot_only,
+        "pid": os.getpid(),
+        "started_at_unix": time.time(),
+    }
+    runtime_path = output / "scoring_logs" / f"execution-{time.time_ns()}-{os.getpid()}.json"
+    write_json(runtime_path, runtime)
+    dataset = None
+    complete = 0
+    total = sum(b - a for a, b in assigned)
+    last_status = 0.0
+
+    def progress(count, force=False):
+        nonlocal complete, last_status
+        complete += int(count)
+        bar.update(count)
+        now = time.monotonic()
+        if args.status_path and (force or now - last_status >= 1):
+            write_json(args.status_path, {"frames": complete, "total": int(total)})
+            last_status = now
+
+    if not args.merge_only:
+        with tqdm(
+            total=total, desc="FrameSkip frames", unit="frame", dynamic_ncols=True, disable=args.worker
+        ) as bar:
+            progress(0, force=True)
+            for left, right in assigned:
+                episode = int(metadata["episode_index"][left])
+                path = cache / f"episode-{episode:06d}.npz"
+                if path.exists():
+                    load_delta(path, right - left)
+                    progress(right - left)
+                    continue
+                if model is None:
+                    model, resolution, weight_hash = load_vision(args.source, args.device)
+                    if (
+                        resolution != provenance["resolution"]
+                        or weight_hash != provenance["vision_weights_sha256"]
+                    ):
+                        raise ValueError("Vision weights differ from the cache source")
+                if dataset is None:
+                    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+                    dataset = LeRobotDataset(args.repo_id, root=args.dataset_root, video_backend="pyav")
+                    if args.decode_mode == "batch":
+                        verify_batch_decoding(
+                            dataset, np.arange(left, min(right, left + args.batch_size)), cameras
+                        )
+                delta = extract_episode(
+                    dataset,
+                    np.arange(left, right),
+                    cameras,
+                    model,
+                    provenance["resolution"],
+                    args.device,
+                    args.batch_size,
+                    args.decode_mode,
+                    progress,
+                )
+                write_delta(path, delta)
+            progress(0, force=True)
+    runtime.update(finished_at_unix=time.time(), frames=int(total))
+    write_json(runtime_path, runtime)
+    if args.worker:
+        return
+    # Only the coordinator/single process merges. No model or video reader is needed on resume.
     all_scores, reports = {}, []
-    selected_episodes = [
-        (a, b) for a, b in episodes if not args.pilot_only or metadata["episode_index"][a] in pilot
-    ]
-    for left, right in tqdm(selected_episodes, desc="FrameSkip scoring", dynamic_ncols=True):
+    for left, right in tqdm(selected, desc="Merge scores", dynamic_ncols=True):
         episode = int(metadata["episode_index"][left])
         task = int(metadata["task_index"][left])
-        path = cache / f"episode-{episode:06d}.npz"
-        if path.exists():
-            with np.load(path, allow_pickle=False) as archive:
-                delta = archive["visual_delta"]
-                if arrays_hash({"visual_delta": delta}) != str(archive["sha256"]):
-                    raise ValueError(f"Corrupted cached visual deltas: {path}")
-        else:
-            delta = extract_episode(
-                dataset, np.arange(left, right), cameras, model, resolution, args.device, args.batch_size
-            )
-            temporary = path.with_suffix(".tmp")
-            with temporary.open("wb") as handle:
-                np.savez_compressed(handle, visual_delta=delta, sha256=arrays_hash({"visual_delta": delta}))
-            temporary.replace(path)
+        delta = load_delta(cache / f"episode-{episode:06d}.npz", right - left)
         scored = score_episode(actions[left:right], delta, low, high, threshold, episode, config)
         if not args.pilot_only:
             for key, value in scored.items():
@@ -343,10 +586,34 @@ def main():
     parser.add_argument(
         "--pilot-only", action="store_true", help="2 episodes/task, cache reusable by full scoring"
     )
+    parser.add_argument("--gpu-ids", help="Independent scoring workers, e.g. 0,1,2,3; no DDP")
+    parser.add_argument("--decode-mode", choices=("batch", "frame"), default="batch")
+    parser.add_argument("--merge-only", action="store_true", help="Validate complete caches and merge on CPU")
+    parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--num-shards", type=int, default=1, help=argparse.SUPPRESS)
+    parser.add_argument("--shard-index", type=int, default=0, help=argparse.SUPPRESS)
+    parser.add_argument("--status-path", type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.batch_size < 1:
         parser.error("batch-size must be positive")
-    score_dataset(args)
+    if args.num_shards < 1 or not 0 <= args.shard_index < args.num_shards:
+        parser.error("Invalid shard index/count")
+    if args.worker and (args.gpu_ids or args.merge_only):
+        parser.error("Worker cannot coordinate or merge")
+    if not args.worker and (args.num_shards != 1 or args.shard_index != 0):
+        parser.error("Shard options are internal; use --gpu-ids")
+    if args.gpu_ids and args.merge_only:
+        parser.error("--merge-only does not use GPUs")
+    if args.worker:
+        score_dataset(args)
+    else:
+        with output_lock(args.output / ".scoring.lock"):
+            if args.gpu_ids:
+                from lerobot.scripts.frameskip_parallel import run_parallel
+
+                run_parallel(args)
+            else:
+                score_dataset(args)
 
 
 if __name__ == "__main__":
