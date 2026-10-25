@@ -5,8 +5,8 @@ This is an adaptation of [FrameSkip](https://arxiv.org/abs/2605.13757), not an e
 ## Fixed recipe and names
 
 - `pi05_libero_base`, frozen backbone, VLM-only token=2, action prompts=0, imported local P1, D0 task slots, global seed0.
-- 2 GPUs/run, batch32 **per GPU** (global64), 3000 updates; original LR/warmup (1000 optimizer warmup steps), bf16, compile disabled.
-- The **data warmup is 500 updates**; it is distinct from the original optimizer's 1000-step LR warmup.
+- 2 GPUs/run, batch32 **per GPU** (global64), 3000 updates; original LR recipe, bf16, compile disabled. Configured LR warmup1000/decay30000 scales to **100 effective LR warmup updates** at3000 total updates.
+- The **data warmup is 500 updates**; it is distinct from the optimizer's effective100-update LR warmup.
 - Full model saved **only at 003000**. Existing small prompt/rank probes and training/input diagnostics remain enabled.
 - Two joint noise/time banks: E0/T0 and E1/T1. All draws follow immutable sample-use IDs (`Bocc`). This is not a separate E-vs-T main-effect experiment.
 - Example name: `pi05-fskip-r1-C-Bocc-base-vlm2-P1-D0-E1-T1`.

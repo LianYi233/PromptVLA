@@ -2134,6 +2134,8 @@ class PI05Policy(PreTrainedPolicy):
         *,
         noise: Tensor | None = None,
         time: Tensor | None = None,
+        action_loss_weights: Tensor | None = None,
+        action_key_mask: Tensor | None = None,
     ) -> tuple[Tensor, dict]:
         """Run the batch through the model and compute the loss for training.
 
@@ -2146,8 +2148,9 @@ class PI05Policy(PreTrainedPolicy):
         if reduction not in ("mean", "none"):
             raise ValueError(f"Unsupported loss reduction: {reduction!r}")
 
+        batch.pop("_pi05_action_loss_weights", None)
         is_stage1 = self.config.training_stage == PI05TrainingStage.NEXT_ACTION
-        if is_stage1 and (noise is not None or time is not None):
+        if is_stage1 and any(x is not None for x in (noise, time, action_loss_weights, action_key_mask)):
             raise ValueError("Explicit flow inputs are supported only in observation-flow training")
         if is_stage1 and not self._stage1_bridge_active:
             actions = self.prepare_action(batch)
@@ -2188,7 +2191,13 @@ class PI05Policy(PreTrainedPolicy):
             return loss, loss_dict
 
         return self._forward_observation_flow(
-            batch, reduction=reduction, stage1_bridge=is_stage1, noise=noise, time=time
+            batch,
+            reduction=reduction,
+            stage1_bridge=is_stage1,
+            noise=noise,
+            time=time,
+            action_loss_weights=action_loss_weights,
+            action_key_mask=action_key_mask,
         )
 
     def _forward_observation_flow(
@@ -2199,6 +2208,8 @@ class PI05Policy(PreTrainedPolicy):
         stage1_bridge: bool,
         noise: Tensor | None = None,
         time: Tensor | None = None,
+        action_loss_weights: Tensor | None = None,
+        action_key_mask: Tensor | None = None,
     ) -> tuple[Tensor, dict]:
         """Compute the formal observation-conditioned flow loss for Stage 2 or its Stage-1 bridge."""
         # Prepare inputs
@@ -2226,14 +2237,32 @@ class PI05Policy(PreTrainedPolicy):
         # Always overwrite the runtime denominator mask so a reused batch cannot retain an
         # inpainting mask after the curriculum switches to full flow.
         batch.pop("pi05_inpainting_mask", None)
+        batch.pop("_pi05_action_loss_weights", None)
         batch[_PI05_LOSS_VALID_STEPS_KEY] = valid_steps
+        # The disabled/B arm uses the original reduction exactly, including its graph.
         loss, per_sample_loss, loss_per_dim = _reduce_action_losses(losses, valid_steps)
+        unweighted_loss = loss.detach()
+        if action_loss_weights is not None:
+            from lerobot.utils.keyframe_loss import weighted_action_loss
+
+            loss, per_sample_loss, loss_per_dim = weighted_action_loss(
+                losses, valid_steps, action_loss_weights
+            )
+            batch["_pi05_action_loss_weights"] = action_loss_weights.to(
+                device=losses.device, dtype=torch.float32
+            )
 
         loss_dict = {
             "loss_per_dim": loss_per_dim.detach().cpu().numpy().tolist(),
             "valid_action_fraction": valid_steps.float().mean().item(),
             "all_padding_samples": float((~valid_steps.any(dim=1)).sum().item()),
         }
+        if action_key_mask is not None:
+            from lerobot.utils.keyframe_loss import loss_splits
+
+            loss_dict.update(loss_splits(losses, valid_steps, action_key_mask.to(losses.device)))
+            loss_dict["keyframe/unweighted_mse"] = unweighted_loss.item()
+            loss_dict["keyframe/weighted_mse"] = loss.detach().item()
         if stage1_bridge:
             loss_dict.update(
                 {
@@ -2251,6 +2280,12 @@ class PI05Policy(PreTrainedPolicy):
     def get_distributed_loss_normalizer(self, batch: dict[str, Tensor]) -> Tensor:
         """Return the local number of valid scalar loss terms for DDP reweighting."""
         valid_steps = _valid_action_steps(batch)
+        if "_pi05_action_loss_weights" in batch:
+            weights = batch["_pi05_action_loss_weights"]
+            if weights.shape != valid_steps.shape:
+                raise ValueError("Invalid runtime action loss weights")
+            action_dim = self.config.output_features[ACTION].shape[0]
+            return torch.where(valid_steps, weights, 0).sum(dtype=torch.float32) * action_dim
         if self.config.training_stage == PI05TrainingStage.NEXT_ACTION and self._stage1_bridge_active:
             # The bridge always optimizes every valid action step. Prefer the runtime phase over a
             # temporary mask that may have been left on a deliberately reused inpainting batch.

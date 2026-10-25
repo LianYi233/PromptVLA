@@ -38,7 +38,7 @@ EXTRA_ARGS=("$@")
 for arg in "${EXTRA_ARGS[@]}"; do
   case "$arg" in
     --wandb.*=*|--policy.optimizer_*=*|--policy.scheduler_*=*|--policy.compile_model=*|\
-    --policy.gradient_checkpointing=*|--num_workers=*|--log_freq=*|--prompt_rank.*=*|--pdet.*=*) ;;
+    --policy.gradient_checkpointing=*|--num_workers=*|--log_freq=*|--prompt_rank.*=*|--pdet.*=*|--keyframe_loss.*=*) ;;
     *) echo "Unsupported override: $arg; use --help for VLM-only controls" >&2; exit 2 ;;
   esac
 done

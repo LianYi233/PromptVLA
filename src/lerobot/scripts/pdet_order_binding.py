@@ -48,7 +48,7 @@ def check_checkpoint(run, step=3000):
     return {"checkpoint": "name_and_config_match", "run": str(run)}
 
 
-def inspect_run(run):
+def inspect_run(run, *, name_checker=check_name):
     run = Path(run)
     manifest, rows = read_run(run)
     factors = manifest["factors"]
@@ -76,7 +76,7 @@ def inspect_run(run):
         raise ValueError("Plan and runtime steps/batch/world size differ")
     if info["dataset_metadata_sha256"] != manifest["dataset_metadata_sha256"]:
         raise ValueError("Recorded dataset identity differs from plan")
-    experiment = check_name(run, factors, manifest["tokens"], info["within_seed"])
+    experiment = name_checker(run, factors, manifest["tokens"], info["within_seed"])
     batch = info["batch_size"]
     count = len(plan["order"])
     bank_rows = [None] * count

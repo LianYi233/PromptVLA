@@ -23,6 +23,8 @@ requires the full backbone.
 
 FrameSkip 风格课程实验：见 [评分、双卡训练与评估说明](examples/analysis/README_frameskip_curriculum.md)。固定 P1/D0、VLM token=2，比较 U/R/S/C 四种安排与两个 ε/t bank；S/C 严格共享样本使用实例和噪声。
 
+关键动作加权课程：见 [W0-Bocc 基线、关键窗口与随机对照](examples/analysis/README_pi05_keyframe_curriculum.md)。复用旧 W0 的全部样本顺序和 ε/t 配对，只改变动作时间步的损失权重；包含 B/K2/R2 和前期／后期加权课程，支持四卡上两条独立双卡队列。
+
 ## Project and implementation
 
 This independent repository continues the `vlm-only` work from

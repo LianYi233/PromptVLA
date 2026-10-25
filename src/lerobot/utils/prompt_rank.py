@@ -148,6 +148,23 @@ class PromptRankMonitor:
             cache["output_probes"],
         )
         result.action_dim, result.horizon = manifest["action_dim"], manifest["chunk_size"]
+        if "keyframe_masks_sha256" in manifest:
+            from lerobot.utils.pdet_order import arrays_hash
+
+            result.keyframe_masks = torch.load(
+                directory / "keyframe_masks.pt", map_location="cpu", weights_only=True
+            )
+            if result.keyframe_masks.dtype != torch.bool or result.keyframe_masks.shape != (
+                len(result.samples),
+                1,
+                result.horizon,
+            ):
+                raise ValueError("Invalid cached keyframe probe mask dimensions/dtype")
+            if (
+                arrays_hash({"key": result.keyframe_masks[:, 0, :].numpy()})
+                != manifest["keyframe_masks_sha256"]
+            ):
+                raise ValueError("Cached keyframe probe masks changed")
         if _fingerprint(result.samples) != manifest["sample_sha256"]:
             raise ValueError("Cached observations do not match the recorded hash")
         if len(result.samples) != len(result.noise) or not result.samples:
@@ -244,6 +261,8 @@ class PromptRankMonitor:
                     "Prompt-rank history is newer than the resumed model; use a new output directory"
                 )
         path.write_text(json.dumps(self.manifest, indent=2, ensure_ascii=False) + "\n")
+        if hasattr(self, "keyframe_masks"):
+            torch.save(self.keyframe_masks, self.output_dir / "keyframe_masks.pt")
         probe_path = self.output_dir / "fixed_probe.pt"
         if not probe_path.exists():
             torch.save(
@@ -289,10 +308,23 @@ class PromptRankMonitor:
         with torch.enable_grad(), autocast_context():
             velocity, target, probes, valid = self._probe_forward(policy, sample_index, timestep)
             if self.options.fixed_flow_loss:
-                errors = (velocity.detach().float() - target.float()).square()[valid]
+                squared = (velocity.detach().float() - target.float()).square()
+                errors = squared[valid]
                 self._last_probe_error = torch.stack(
                     (errors.sum(), torch.tensor(errors.numel(), device=self.device, dtype=torch.float32))
                 )
+                if hasattr(self, "keyframe_masks"):
+                    key = self.keyframe_masks[sample_index].to(self.device) & valid
+                    split_errors = []
+                    for mask in (key, valid & ~key):
+                        values = squared[mask]
+                        split_errors.extend(
+                            (
+                                values.sum(),
+                                torch.tensor(values.numel(), device=self.device, dtype=torch.float32),
+                            )
+                        )
+                    self._last_probe_error = torch.cat((self._last_probe_error, torch.stack(split_errors)))
             rows = []
             for index, probe in enumerate(probes):
                 (gradient,) = torch.autograd.grad(
@@ -324,14 +356,16 @@ class PromptRankMonitor:
                     )
                     gathered = accelerator.gather(local)
                     if self.options.fixed_flow_loss:
+                        error_columns = 6 if hasattr(self, "keyframe_masks") else 2
                         local_error = (
                             self._last_probe_error
                             if sample_index < len(self.samples)
-                            else torch.zeros(2, device=self.device)
+                            else torch.zeros(error_columns, device=self.device)
                         )
-                        errors = accelerator.gather(local_error).reshape(world, 2)
+                        errors = accelerator.gather(local_error).reshape(world, error_columns)
                         if accelerator.is_main_process:
-                            for rank, (total, count) in enumerate(errors.cpu().tolist()):
+                            for rank, values in enumerate(errors.cpu().tolist()):
+                                total, count = values[:2]
                                 if start + rank < len(self.samples):
                                     identity = self.manifest["samples"][start + rank]
                                     loss_records.append(
@@ -343,6 +377,13 @@ class PromptRankMonitor:
                                             "valid_coordinates": int(count),
                                         }
                                     )
+                                    if error_columns == 6:
+                                        loss_records[-1].update(
+                                            key_squared_error_sum=values[2],
+                                            key_coordinates=int(values[3]),
+                                            nonkey_squared_error_sum=values[4],
+                                            nonkey_coordinates=int(values[5]),
+                                        )
                     if accelerator.is_main_process:
                         valid_ranks = min(world, len(self.samples) - start)
                         rows.append(gathered[: valid_ranks * self.options.output_probes].cpu().numpy())
@@ -369,6 +410,14 @@ class PromptRankMonitor:
     def _save_step(self, policy, step, rows, elapsed, loss_records=None):
         metrics, gram, eigenvalues, singular_values = tangent_spectrum(rows)
         if loss_records:
+            if "key_coordinates" in loss_records[0]:
+                for label in ("key", "nonkey"):
+                    count = sum(item[f"{label}_coordinates"] for item in loss_records)
+                    metrics[f"fixed_training_probe_{label}_coordinates"] = count
+                    if count:
+                        metrics[f"fixed_training_probe_{label}_mse"] = (
+                            sum(item[f"{label}_squared_error_sum"] for item in loss_records) / count
+                        )
             metrics["fixed_training_probe_flow_mse"] = sum(
                 item["squared_error_sum"] for item in loss_records
             ) / sum(item["valid_coordinates"] for item in loss_records)

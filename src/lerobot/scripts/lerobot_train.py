@@ -1047,6 +1047,14 @@ def _train_single_stage(
             accelerator, lambda: PDETStreams(cfg, accelerator.unwrap_model(policy), accelerator)
         )
 
+    keyframe_runtime = None
+    if cfg.keyframe_loss.enabled:
+        from lerobot.utils.keyframe_loss import KeyframeLossRuntime
+
+        keyframe_runtime = collective_call(
+            accelerator, lambda: KeyframeLossRuntime(cfg, pdet_streams, accelerator)
+        )
+
     policy.train()
 
     parameter_monitor = None
@@ -1107,6 +1115,8 @@ def _train_single_stage(
                 dataset, preprocessor, active_cfg, cfg.prompt_rank, cfg.output_dir, device
             ),
         )
+        if keyframe_runtime is not None:
+            collective_call(accelerator, lambda: keyframe_runtime.attach_probe_masks(prompt_rank_monitor))
         prompt_rank_monitor.verify_across_ranks(accelerator)
         collective_call(
             accelerator, lambda: prompt_rank_monitor.save_protocol(step) if is_main_process else None
@@ -1217,9 +1227,12 @@ def _train_single_stage(
             def draw_flow(
                 batch=batch, step=step, sample_indices=sample_indices, occurrence_ids=occurrence_ids
             ):
-                return pdet_streams.draw(
+                inputs = pdet_streams.draw(
                     accelerator.unwrap_model(policy), batch, step, sample_indices, occurrence_ids
                 )
+                if keyframe_runtime is not None:
+                    inputs.update(keyframe_runtime.inputs(batch, step, sample_indices, occurrence_ids))
+                return inputs
 
             # Propagate audit I/O failures before any rank enters backward collectives.
             forward_kwargs = (
@@ -1259,6 +1272,13 @@ def _train_single_stage(
         # Note: eval and checkpoint happens *after* the `step`th training update has completed, so we
         # increment `step` here.
         step += 1
+        if keyframe_runtime is not None and (
+            (cfg.log_freq > 0 and step % cfg.log_freq == 0) or step == cfg.steps
+        ):
+            collective_call(
+                accelerator,
+                lambda step=step, output_dict=output_dict: keyframe_runtime.record_metrics(step, output_dict),
+            )
         if is_main_process:
             progbar.update(1)
         train_tracker.step()
