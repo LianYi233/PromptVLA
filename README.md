@@ -25,6 +25,8 @@ FrameSkip 风格课程实验：见 [评分、双卡训练与评估说明](exampl
 
 关键动作加权课程：见 [W0-Bocc 基线、关键窗口与随机对照](examples/analysis/README_pi05_keyframe_curriculum.md)。复用旧 W0 的全部样本顺序和 ε/t 配对，只改变动作时间步的损失权重；包含 B/K2/R2 和前期／后期加权课程，支持四卡上两条独立双卡队列。
 
+预训练来源对照：见 [重复 W0-Bocc，并比较 pi05_libero_base 与 pi05_base](examples/analysis/README_pi05_source_compare.md)。固定同一份 P1 prompt、D0/W0 样本及 E1/T1 噪声，只替换原始权重；两组共享 LIBERO 配置与处理器，四卡并行训练两个模型。
+
 ## Project and implementation
 
 This independent repository continues the `vlm-only` work from
