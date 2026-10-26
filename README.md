@@ -109,14 +109,28 @@ asset locations/configs are backed up. Re-run after a download interruption; use
 `python -m lerobot.scripts.setup_libero_assets --skip-download` to configure an
 already downloaded directory offline. This is a resource check, not a simulator test.
 
-The initialization step follows normal base-model construction for seeds 0 and 1
-and exports `pi05-base-vlm2-init-seed{0,1}.safetensors`. It loads the full model but
+The initialization step follows normal `pi05_libero_base` construction for seeds 0 and 1
+and exports `pi05_libero_base-vlm2-init-seed{0,1}.safetensors`. It loads the full model but
 performs zero updates, creates no optimizer/probes/full checkpoint, and disables
 W&B. The files contain prompt hashes and construction provenance. These are **new
 local initializations**, not verified reconstructions of the historical server's
 prompts. Use the same pair throughout the new P/D/E/T experiment.
 Existing files are never overwritten; after a partial export select the missing
 seed with `INIT_SEEDS=1 ... inits`. Ordinary VLM-only training does not require these files.
+
+Existing `pi05-base-vlm2-init-seed{0,1}.safetensors` files refer to the LIBERO source,
+not the generic `pi05_base`. Rename them without changing tensor values or provenance:
+
+```bash
+PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}" \
+python -m lerobot.scripts.export_pi05_prompt_init rename-libero-inits /data1/wyn/prompt-work
+```
+
+The CPU-only migration validates the recorded source and keeps old names as relative
+symlinks for historical configs. Launchers prefer explicit names and still accept
+unmigrated legacy files; conflicting copies are rejected. The weights-only source
+comparison deliberately shares the SAME saved P1 tensor across both backbones.
+Do not regenerate P1 separately for the generic backbone in that comparison.
 
 The availability of four GPUs does not change the experiment recipe automatically;
 the token/rank/PDET sweeps still default to two GPUs and batch 32 per GPU. Keep

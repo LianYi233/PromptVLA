@@ -82,10 +82,12 @@ PY
 fi
 run_one() {
   local i="$1" dry="$2" item="${CASES[$1]}"
+  local init_path
+  init_path=$(python -m lerobot.scripts.export_pi05_prompt_init resolve-libero-init "$PROMPT_INIT_DIR" --seed "${item:0:1}")
   local extra=()
   if [[ -n "${PLANS[$i]}" ]]; then extra+=(--pdet.order_plan="${PLANS[$i]}"); fi
   RUN_NAME="$(basename -- "${RUN_DIRS[$i]}")" \
-  PROMPT_INIT_PATH="$PROMPT_INIT_DIR/pi05-base-vlm2-init-seed${item:0:1}.safetensors" \
+  PROMPT_INIT_PATH="$init_path" \
   VLM_PROMPT_TOKENS=2 DRY_RUN="$dry" \
     bash "$SCRIPT_DIR/train_pi05_vlm_only.sh" base 0 \
     --policy.compile_model=false \

@@ -35,7 +35,7 @@ PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}" \
 python -m lerobot.scripts.pi05_source_compare prepare
 ```
 
-默认输入为上述两个模型、`/home/wyn/datasets/libero`、`/data1/wyn/prompt-work/pi05-base-vlm2-init-seed1.safetensors`、`/data1/wyn/prompt-work/keyframe-r1/D0-W0.npz`。默认参考运行是新69.25%的 `pi05-key-r1-B-W0-Bocc-base-vlm2-P1-D0-E1-T1`，其W0计划与噪声bank此前已与旧70.50%设置核对。旧运行及完整PDET记录还在时可显式传入：
+默认输入为上述两个模型、`/home/wyn/datasets/libero`、`/data1/wyn/prompt-work/pi05_libero_base-vlm2-init-seed1.safetensors`（兼容旧名`pi05-base-vlm2-init-seed1.safetensors`）、`/data1/wyn/prompt-work/keyframe-r1/D0-W0.npz`。默认参考运行是新69.25%的 `pi05-key-r1-B-W0-Bocc-base-vlm2-P1-D0-E1-T1`，其W0计划与噪声bank此前已与旧70.50%设置核对。旧运行及完整PDET记录还在时可显式传入：
 
 ```bash
 PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}" \
@@ -44,6 +44,16 @@ python -m lerobot.scripts.pi05_source_compare prepare \
 ```
 
 **上面两条prepare二选一**。模型路径不同时用 `--generic /实际/pi05_base目录`、`--libero ...`。已有输出拒绝覆盖；准备完成后复用 `check`。旧W0计划不可替换成FrameSkip U计划，P1不可重新随机生成。
+
+旧文件名的`base`是`pi05_libero_base`的历史简称。可先运行下面的CPU迁移，校验元数据来源后使用明确名称，并保留旧名软链接：
+
+```bash
+python -m lerobot.scripts.export_pi05_prompt_init rename-libero-inits /data1/wyn/prompt-work
+```
+
+迁移保持完整文件字节、张量哈希和原始来源元数据不变。已生成的`source-pair-r1/P1.safetensors`是独立副本，无需重建pair目录或重新训练。该副本在两个来源组中共用；其构造来源是LIBERO模型，不表示它含有训练得到的LIBERO知识。Prompt在这里是随机初值，权重来源和prompt初始化是两个分开的实验因素。
+
+如另行研究“每个模型各自生成初始化”，可将通用来源文件命名为`pi05_base-vlm2-init-seed{0,1}.safetensors`，并记录真实构造来源。相同seed在相同构造流程下可能生成完全相同的张量，也可能因流程/RNG消耗变化而不同，需比较`prompt_sha256`。这样的扩展必须与当前固定P1的权重对照分开，不应直接替换当前P1文件。
 
 输出 `/data1/wyn/prompt-work/source-pair-r1/` 中含 `libero/`、`generic/`、只读使用的 `D0-W0.npz`、`P1.safetensors` 和 `pair.json`。模型大文件只是软链接，训练及后续审计需要保留原始文件。首次完整权重哈希可能耗时数分钟；后续启动只核对大小、mtime、路径和小文件哈希，可选 `check --full-hash` 重新完整校验。
 

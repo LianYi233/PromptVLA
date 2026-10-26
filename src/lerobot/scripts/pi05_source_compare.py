@@ -16,6 +16,7 @@ from pathlib import Path
 from safetensors import safe_open
 
 from lerobot.scripts.libero_vlm_only import assert_same_processors, processor_files, validate_source
+from lerobot.utils.prompt_init_names import resolve_libero_prompt
 from lerobot.utils.prompt_initialization import read_initial_prompt
 
 PROTOCOL = "pi05-weight-source-pair-v1"
@@ -208,6 +209,12 @@ def prepare(libero, generic, plan_path, prompt_path, dataset_root, reference_run
         "order_plan": info,
         "prompt_file_sha256": digest(prompt_path),
         "prompt_sha256": prompt["prompt_sha256"],
+        "shared_prompt_provenance": {
+            "filename": prompt_path.name,
+            "source_pretrained_path": prompt.get("source_pretrained_path"),
+            "source_training_seed": prompt["source_training_seed"],
+            "scope": "The SAME saved P1 tensor is used for both weight sources.",
+        },
         "weight_schema_sha256": hashlib.sha256(
             json.dumps(schemas["libero"], sort_keys=True).encode()
         ).hexdigest(),
@@ -345,8 +352,9 @@ def main():
     prep.add_argument("--generic", type=Path, default=Path("/home/wyn/models/lerobot/pi05_base"))
     prep.add_argument("--old-plan", type=Path, default=Path("/data1/wyn/prompt-work/keyframe-r1/D0-W0.npz"))
     prep.add_argument(
-        "--prompt", type=Path, default=Path("/data1/wyn/prompt-work/pi05-base-vlm2-init-seed1.safetensors")
+        "--prompt", type=Path, help="Explicit saved P1; default prefers the source-named LIBERO initializer"
     )
+    prep.add_argument("--prompt-init-dir", type=Path, default=Path("/data1/wyn/prompt-work"))
     prep.add_argument("--dataset-root", type=Path, default=Path("/home/wyn/datasets/libero"))
     prep.add_argument(
         "--reference-run",
@@ -369,7 +377,7 @@ def main():
             args.libero,
             args.generic,
             args.old_plan,
-            args.prompt,
+            args.prompt or resolve_libero_prompt(args.prompt_init_dir, 1),
             args.dataset_root,
             args.reference_run,
             args.output,

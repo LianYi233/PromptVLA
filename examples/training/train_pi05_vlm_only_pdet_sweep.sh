@@ -13,7 +13,7 @@ Names: pi05-pdet-base-vlm2-P1-D1-E1-T1 (RUN_PREFIX defaults to pi05-pdet).
 This independent-stream protocol does NOT replay historical global-seed noise/time draws.
 
 PROMPT_INIT_DIR defaults to /data1/wyn/prompt-work and must contain:
-  pi05-base-vlm2-init-seed0.safetensors and pi05-base-vlm2-init-seed1.safetensors
+  pi05_libero_base-vlm2-init-seed{0,1}.safetensors (legacy pi05-base names accepted)
 Both are checked against their provenance and must have different tensor hashes.
 Inputs default to /home/wyn/{models,datasets}; checkpoints default to
 /data1/wyn/chkpt/2601-lerobot/PromptVLA; logs to /data1/wyn/chkpt/2601-lerobot/logs.
@@ -74,8 +74,10 @@ PY
 run_one() {
   local item="$1" dry="$2"
   local p="${item:0:1}" d="${item:1:1}" e="${item:2:1}" t="${item:3:1}"
+  local init_path
+  init_path=$(python -m lerobot.scripts.export_pi05_prompt_init resolve-libero-init "$PROMPT_INIT_DIR" --seed "$p")
   RUN_NAME="${RUN_PREFIX}-base-vlm2-P${p}-D${d}-E${e}-T${t}" \
-  PROMPT_INIT_PATH="$PROMPT_INIT_DIR/pi05-base-vlm2-init-seed${p}.safetensors" \
+  PROMPT_INIT_PATH="$init_path" \
   VLM_PROMPT_TOKENS=2 DRY_RUN="$dry" \
     bash "$SCRIPT_DIR/train_pi05_vlm_only.sh" base 0 \
     --pdet.enabled=true --pdet.prompt_seed="$p" --pdet.data_seed="$d" \

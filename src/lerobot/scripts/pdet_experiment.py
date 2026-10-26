@@ -7,13 +7,14 @@ import subprocess
 from itertools import combinations
 from pathlib import Path
 
+from lerobot.utils.prompt_init_names import resolve_libero_prompt
 from lerobot.utils.prompt_initialization import read_initial_prompt
 
 
 def check_initializations(directory):
     hashes = []
     for seed in (0, 1):
-        _, metadata = read_initial_prompt(Path(directory) / f"pi05-base-vlm2-init-seed{seed}.safetensors", 2)
+        _, metadata = read_initial_prompt(resolve_libero_prompt(directory, seed), 2)
         if metadata["source_training_seed"] != seed or metadata.get("source_prompt_init_path"):
             raise ValueError(f"P{seed} provenance must refer to an original, unswapped seed-{seed} prompt")
         hashes.append(metadata["prompt_sha256"])

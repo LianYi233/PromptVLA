@@ -59,7 +59,8 @@ done
 python -m lerobot.scripts.frameskip_experiment audit-plans "$PLAN_DIR" --scores "$SCORE_DIR/scores.npz"
 python -m lerobot.scripts.frameskip_experiment check-inputs --scores "$SCORE_DIR/scores.npz" \
   --dataset-root "$DATASET_ROOT" --source "$BASE_PRETRAINED_PATH"
-python - "$PROMPT_INIT_DIR/pi05-base-vlm2-init-seed1.safetensors" <<'PY'
+LIBERO_PROMPT_INIT=$(python -m lerobot.scripts.export_pi05_prompt_init resolve-libero-init "$PROMPT_INIT_DIR" --seed 1)
+python - "$LIBERO_PROMPT_INIT" <<'PY'
 import sys
 from lerobot.utils.prompt_initialization import read_initial_prompt
 _, metadata = read_initial_prompt(sys.argv[1], 2)
@@ -71,7 +72,7 @@ run_one() {
   local i="$1" dry="$2" cell="${REQUESTED[$1]}"
   local b="${cell:1:1}" schedule="${cell:0:1}"
   RUN_NAME="$(basename -- "${RUN_DIRS[$i]}")" VLM_PROMPT_TOKENS=2 DRY_RUN="$dry" \
-  PROMPT_INIT_PATH="$PROMPT_INIT_DIR/pi05-base-vlm2-init-seed1.safetensors" \
+  PROMPT_INIT_PATH="$LIBERO_PROMPT_INIT" \
     bash "$SCRIPT_DIR/train_pi05_vlm_only.sh" base 0 \
     --policy.compile_model=false \
     --pdet.enabled=true --pdet.prompt_seed=1 --pdet.data_seed=0 \
