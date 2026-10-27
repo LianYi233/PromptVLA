@@ -30,6 +30,8 @@ FrameSkip 风格课程实验：见 [评分、双卡训练与评估说明](exampl
 从难到易的顺序实验：见 [固定 LIBERO 起点与原样本/噪声配对，仅按旧评分降序训练](examples/analysis/README_pi05_hard_to_easy.md)。以本轮 source-libero 为对照，复用评分缓存，在各 task 内调整原 W0 样本使用顺序；单组双卡、VLM2、P1/D0/E1/T1、3000步，无重采样或loss加权。
 设置 `TRAIN_ACTION_EXPERT=true` 可在同一入口训练 VLM prompt 和完整动作生成网络（动作 Transformer、动作投影、时间 MLP）；视觉/VLM主干仍冻结，模型名增加 `aexpert`，评估时使用相同开关。默认false保留原prompt-only实验。
 
+可调曝光比例的双向课程：见 [易→难多学简单样本 / 难→易多学困难样本](examples/analysis/README_pi05_ratio_curriculum.md)。新入口 `train_pi05_ratio_curriculum.sh` 固定训练VLM2+完整action expert，用 `CURRICULUM_DIRECTION` 控制顺序、`EASY_PERCENT` 控制简单样本使用占比（默认70%/30%），仍为双卡×batch32、3000步。四卡可并行两组；重采样会改变样本与噪声的配对，记录为独立干预。
+
 ## Project and implementation
 
 This independent repository continues the `vlm-only` work from
