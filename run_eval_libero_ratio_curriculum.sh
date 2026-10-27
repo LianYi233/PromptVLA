@@ -4,9 +4,10 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
   cat <<'EOF'
 Usage: bash run_eval_libero_ratio_curriculum.sh [all|no10|SUITE]
-Use the training CURRICULUM_DIRECTION, EASY_PERCENT, SAMPLE_SEED and REPEAT_ID.
+Use the training FLOW_STEPS, CURRICULUM_DIRECTION, EASY_PERCENT, SAMPLE_SEED and REPEAT_ID.
 Defaults: easy_to_hard/e70 (hard_to_easy defaults to e30), S0/r1, GPU_ID=0,
-checkpoint003000, EVAL_SEED=1000, EPISODES_PER_TASK=10, PROGRESS=true.
+FLOW_STEPS=6000/checkpoint006000, EVAL_SEED=1000, EPISODES_PER_TASK=10, PROGRESS=true.
+Set FLOW_STEPS=3000 to evaluate the legacy 3000-step names/checkpoint003000.
 Controls: SOURCE_PAIR_DIR, ORDER_DIR, CKPT_ROOT, BASE_OUTPUT, EVAL_LOG_ROOT, DRY_RUN.
 Always validates/loads the trained full action expert + VLM prompt checkpoint.
 EOF
@@ -20,7 +21,12 @@ for key in PRETRAINED_PATH BASE_PRETRAINED_PATH RUN_NAME RUN_PREFIX VLM_PROMPT_T
 done
 export PYTHONPATH="$SCRIPT_DIR/src${PYTHONPATH:+:$PYTHONPATH}"
 export CKPT_ROOT="${CKPT_ROOT:-/data1/wyn/chkpt/2601-lerobot/PromptVLA}"
-export GPU_ID="${GPU_ID:-0}" CHECKPOINT_STEP=3000 TRAIN_ACTION_EXPERT=true
+FLOW_STEPS="${FLOW_STEPS:-6000}"
+[[ "$FLOW_STEPS" =~ ^[1-9][0-9]*$ ]] || { echo 'Invalid FLOW_STEPS' >&2; exit 2; }
+if [[ -n "${CHECKPOINT_STEP:-}" && "$CHECKPOINT_STEP" != "$FLOW_STEPS" ]]; then
+  echo 'CHECKPOINT_STEP must equal FLOW_STEPS; only the final checkpoint is saved' >&2; exit 2
+fi
+export GPU_ID="${GPU_ID:-0}" CHECKPOINT_STEP="$FLOW_STEPS" TRAIN_ACTION_EXPERT=true
 export EVAL_SEED="${EVAL_SEED:-1000}" EPISODES_PER_TASK="${EPISODES_PER_TASK:-10}"
 export WAIT_FOR_CHECKPOINTS=false PROGRESS="${PROGRESS:-true}"
 REPEAT_ID="${REPEAT_ID:-1}"
@@ -33,7 +39,7 @@ case "$CURRICULUM_DIRECTION" in
 esac
 SAMPLE_SEED="${SAMPLE_SEED:-0}"
 LABEL=$(python -m lerobot.scripts.pi05_ratio_curriculum label \
-  --direction "$CURRICULUM_DIRECTION" --easy-percent "$EASY_PERCENT" --sample-seed "$SAMPLE_SEED")
+  --direction "$CURRICULUM_DIRECTION" --easy-percent "$EASY_PERCENT" --sample-seed "$SAMPLE_SEED" --steps "$FLOW_STEPS")
 SOURCE_PAIR_DIR="${SOURCE_PAIR_DIR:-/data1/wyn/prompt-work/source-pair-r1}"
 ORDER_DIR="${ORDER_DIR:-/data1/wyn/prompt-work/ratio-curriculum/$LABEL}"
 prefix="pi05-curriculum-${LABEL}-aexpert-r${REPEAT_ID}-libero-Bocc"

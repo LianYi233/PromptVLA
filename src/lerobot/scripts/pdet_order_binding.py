@@ -48,7 +48,7 @@ def check_checkpoint(run, step=3000):
     return {"checkpoint": "name_and_config_match", "run": str(run)}
 
 
-def inspect_run(run, *, name_checker=check_name):
+def inspect_run(run, *, name_checker=check_name, bank_prefix_count=None):
     run = Path(run)
     manifest, rows = read_run(run)
     factors = manifest["factors"]
@@ -131,6 +131,13 @@ def inspect_run(run, *, name_checker=check_name):
         "occurrences": count, "bank_sha256": digest.hexdigest(),
         "order_sha256": arrays_hash({"order": np.asarray(plan["order"])}),
     }
+    if bank_prefix_count is not None:
+        if type(bank_prefix_count) is not int or not 1 <= bank_prefix_count <= count:
+            raise ValueError("Invalid bank prefix count")
+        prefix = hashlib.sha256()
+        for row in bank_rows[:bank_prefix_count]:
+            prefix.update(row)
+        report.update(bank_prefix_count=bank_prefix_count, bank_prefix_sha256=prefix.hexdigest())
     return invariant, report
 
 

@@ -12,8 +12,9 @@ Default 70 for easy_to_hard, 30 for hard_to_easy. Hard percent = 100 - EASY_PERC
 Each task's candidate frames are split into lower/upper score halves. Resample each
 group to its quota, then sort within fixed task slots. Repeat uses get fresh IDs/E/T.
 SAMPLE_SEED=0 controls group sampling only; P1/D0/E1/T1 remain fixed.
-Fixed: TRAIN_ACTION_EXPERT=true, VLM2, global seed0, 2 GPUs x batch32, 3000 steps,
-bf16, no compile, no loss weighting, final-only checkpoint003000.
+FLOW_STEPS=6000 (default): one curriculum over the whole budget; final-only checkpoint006000.
+Fixed: TRAIN_ACTION_EXPERT=true, VLM2, global seed0, 2 GPUs x batch32,
+bf16, no compile, no loss weighting. FLOW_STEPS=3000 retains legacy plan/run names.
 Defaults: GPU_IDS=0,1 MAIN_PROCESS_PORT=29584 REPEAT_ID=1 DRY_RUN=false.
 SOURCE_PAIR_DIR=/data1/wyn/prompt-work/source-pair-r1
 SCORES_PATH=/data1/wyn/prompt-work/frameskip-r1/scores.npz
@@ -35,7 +36,8 @@ export OUTPUT_ROOT="${OUTPUT_ROOT:-/data1/wyn/chkpt/2601-lerobot/PromptVLA}"
 export LOG_ROOT="${LOG_ROOT:-/data1/wyn/chkpt/2601-lerobot/logs}"
 export DATASET_ROOT="${DATASET_ROOT:-/home/wyn/datasets/libero}"
 export GPU_IDS="${GPU_IDS:-0,1}" MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-29584}"
-export BATCH_SIZE=32 NUM_PROCESSES=2 FLOW_STEPS=3000 SAVE_ONLY_FINAL=true DTYPE=bfloat16
+export BATCH_SIZE=32 NUM_PROCESSES=2 FLOW_STEPS="${FLOW_STEPS:-6000}" SAVE_ONLY_FINAL=true DTYPE=bfloat16
+[[ "$FLOW_STEPS" =~ ^[1-9][0-9]*$ ]] || { echo 'Invalid FLOW_STEPS' >&2; exit 2; }
 if [[ "${TRAIN_ACTION_EXPERT:-true}" != true ]]; then
   echo 'This recipe requires TRAIN_ACTION_EXPERT=true' >&2; exit 2
 fi
@@ -50,7 +52,7 @@ case "$CURRICULUM_DIRECTION" in
   *) echo 'Invalid CURRICULUM_DIRECTION' >&2; exit 2 ;;
 esac
 SAMPLE_SEED="${SAMPLE_SEED:-0}"
-SETTINGS=(--direction "$CURRICULUM_DIRECTION" --easy-percent "$EASY_PERCENT" --sample-seed "$SAMPLE_SEED")
+SETTINGS=(--direction "$CURRICULUM_DIRECTION" --easy-percent "$EASY_PERCENT" --sample-seed "$SAMPLE_SEED" --steps "$FLOW_STEPS")
 LABEL=$(python -m lerobot.scripts.pi05_ratio_curriculum label "${SETTINGS[@]}")
 SOURCE_PAIR_DIR="${SOURCE_PAIR_DIR:-/data1/wyn/prompt-work/source-pair-r1}"
 ORDER_DIR="${ORDER_DIR:-/data1/wyn/prompt-work/ratio-curriculum/$LABEL}"
@@ -74,7 +76,7 @@ PROMPT_INIT_PATH="$SOURCE_PAIR_DIR/P1.safetensors" \
   --pdet.enabled=true --pdet.prompt_seed=1 --pdet.data_seed=0 \
   --pdet.noise_seed=1 --pdet.time_seed=1 \
   --pdet.order_plan="$ORDER_DIR/plan.npz" --pdet.flow_binding=occurrence \
-  --pdet.audit_steps=3000 --pdet.diagnostics=true \
+  --pdet.audit_steps="$FLOW_STEPS" --pdet.diagnostics=true \
   --prompt_rank.freq=250 --prompt_rank.samples=16 --prompt_rank.output_probes=4 \
   --prompt_rank.seed=2026 --prompt_rank.timesteps='[0.2,0.5,0.8]' \
   --prompt_rank.extra_steps='[50,100]' --prompt_rank.fixed_flow_loss=true \

@@ -22,7 +22,7 @@ from lerobot.utils.pdet_order import META_COLUMNS, arrays_hash, load_plan, save_
 PROTOCOL = "pi05-ratio-curriculum-v1"
 DIRECTIONS = {"easy_to_hard": "E2H", "hard_to_easy": "H2E"}
 NAME = re.compile(
-    r"pi05-curriculum-(E2H|H2E)-e([0-9]+)-h([0-9]+)-S([0-9]+)-aexpert-r([1-9][0-9]*)"
+    r"pi05-curriculum-(E2H|H2E)-e([0-9]+)-h([0-9]+)-S([0-9]+)(-steps[1-9][0-9]*)?-aexpert-r([1-9][0-9]*)"
     r"-libero-Bocc-base-vlm2-P1-D0-E1-T1"
 )
 
@@ -37,9 +37,17 @@ def options(direction, easy_percent, sample_seed):
     return {"direction": direction, "easy_percent": easy_percent, "sample_seed": sample_seed}
 
 
-def label(direction, easy_percent, sample_seed):
+def validate_steps(steps):
+    if type(steps) is not int or steps < 1:
+        raise ValueError("steps must be a positive integer")
+    return steps
+
+
+def label(direction, easy_percent, sample_seed, steps=3000):
     options(direction, easy_percent, sample_seed)
-    return f"{DIRECTIONS[direction]}-e{easy_percent}-h{100 - easy_percent}-S{sample_seed}"
+    validate_steps(steps)
+    suffix = "" if steps == 3000 else f"-steps{steps}"
+    return f"{DIRECTIONS[direction]}-e{easy_percent}-h{100 - easy_percent}-S{sample_seed}{suffix}"
 
 
 def partition(baseline, scores, score_manifest):
@@ -82,23 +90,29 @@ def _draw(candidates, count, seed):
     return np.concatenate(pieces)
 
 
-def make_plan(baseline, scores, score_manifest, *, direction, easy_percent, sample_seed=0):
+def make_plan(baseline, scores, score_manifest, *, direction, easy_percent, sample_seed=0, steps=None):
     settings = options(direction, easy_percent, sample_seed)
     easy = partition(baseline, scores, score_manifest)
-    tasks, counts = np.unique(baseline["task_index"], return_counts=True)
+    info = baseline["manifest"]
+    steps = validate_steps(info["steps"] if steps is None else steps)
+    # Extend task slots, NOT the already-sorted curriculum. Sort the entire new
+    # budget once so an E2H/H2E course never restarts halfway through training.
+    size = steps * info["batch_size"] * info["world_size"]
+    task_slots = np.resize(baseline["task_index"], size)
+    tasks, counts = np.unique(task_slots, return_counts=True)
     # Largest remainder allocation gives the requested GLOBAL number of sample uses,
     # with less than one use of rounding error per task. Ties use ascending task ID.
     quotas = counts * easy_percent // 100
-    target = (len(baseline["order"]) * easy_percent + 50) // 100
+    target = (size * easy_percent + 50) // 100
     remainder = int(target - quotas.sum())
     quotas[np.argsort(-(counts * easy_percent % 100), kind="stable")[:remainder]] += 1
     if np.any(quotas == 0) or np.any(quotas == counts):
         raise ValueError("Budget too small for this ratio: every task must retain both groups")
-    parents = np.empty_like(baseline["order"])
+    parents = np.empty(size, dtype=np.int64)
     summary = []
     for task, count, quota in zip(tasks, counts, quotas, strict=True):
-        slots = np.flatnonzero(baseline["task_index"] == task)
-        uses = baseline["order"][slots]
+        slots = np.flatnonzero(task_slots == task)
+        uses = baseline["order"][baseline["task_index"] == task]
         groups = easy[baseline["index"][uses]]
         selected = np.concatenate(
             [
@@ -138,6 +152,8 @@ def make_plan(baseline, scores, score_manifest, *, direction, easy_percent, samp
         order[slots] = slots[np.lexsort((slots, sign * values[slots], sign * group))]
     manifest = {
         **baseline["manifest"],
+        "steps": steps,
+        "task_schedule_sha256": arrays_hash({"task": task_slots}),
         "difficulty_sampling": {
             "protocol": PROTOCOL,
             **settings,
@@ -153,31 +169,49 @@ def make_plan(baseline, scores, score_manifest, *, direction, easy_percent, samp
         "instance_pool_sha256": arrays_hash(arrays),
         "scope": "Resampled D0 pool, original task slots, NEW occurrence IDs; E/T follow new uses",
     }
+    if steps != info["steps"]:
+        manifest["difficulty_sampling"]["budget"] = {
+            "reference_steps": info["steps"],
+            "steps": steps,
+            "task_slots": "cycle_original_task_schedule_then_truncate",
+            "ordering": "single_course_over_full_budget",
+        }
+        manifest["scope"] = (
+            "Resampled original D0 candidates, cycled task slots, NEW occurrence IDs; E/T follow new uses"
+        )
     arrays["order"] = order
     manifest["arrays_sha256"] = arrays_hash(arrays)
     return {**arrays, "manifest": manifest}
 
 
-def prepare(pair, scores_path, reference, output, *, direction, easy_percent, sample_seed=0):
+def prepare(pair, scores_path, reference, output, *, direction, easy_percent, sample_seed=0, steps=6000):
     from lerobot.scripts.frameskip_scores import check_inputs
 
     settings = options(direction, easy_percent, sample_seed)
+    validate_steps(steps)
     pair, scores_path, reference, output = [Path(p).resolve() for p in (pair, scores_path, reference, output)]
     if output.exists():
         record = check(output)
-        if (record["pair"], record["scores"], record["reference_run"], record["settings"]) != (
+        if (
+            record["pair"],
+            record["scores"],
+            record["reference_run"],
+            record["settings"],
+            record["plan"]["steps"],
+        ) != (
             str(pair),
             str(scores_path),
             str(reference),
             settings,
+            steps,
         ):
             raise ValueError("Existing curriculum uses different settings/inputs; choose a new ORDER_DIR")
-        return {"prepared": "reused", "directory": str(output), **settings}
+        return {"prepared": "reused", "directory": str(output), "steps": steps, **settings}
     source = original.reference_inputs(pair, reference)
     check_inputs(scores_path, Path(source["dataset_root"]), Path(source["config_source"]))
     scores, score_manifest = load_scores(scores_path)
     baseline = load_plan(pair / "D0-W0.npz")
-    plan = make_plan(baseline, scores, score_manifest, **settings)
+    plan = make_plan(baseline, scores, score_manifest, **settings, steps=steps)
     record = {
         "protocol": PROTOCOL,
         "settings": settings,
@@ -213,6 +247,7 @@ def prepare(pair, scores_path, reference, output, *, direction, easy_percent, sa
     return {
         "prepared": "passed",
         "directory": str(output),
+        "steps": steps,
         **settings,
         "easy_uses": int(easy.sum()),
         "hard_uses": int((~easy).sum()),
@@ -237,7 +272,13 @@ def check(directory):
     scores, score_manifest = load_scores(record["scores"])
     if score_manifest != record["score_recipe"]:
         raise ValueError("Score recipe changed")
-    expected = make_plan(load_plan(pair / "D0-W0.npz"), scores, score_manifest, **record["settings"])
+    expected = make_plan(
+        load_plan(pair / "D0-W0.npz"),
+        scores,
+        score_manifest,
+        **record["settings"],
+        steps=record["plan"]["steps"],
+    )
     actual = load_plan(directory / "plan.npz")
     if actual["manifest"] != expected["manifest"] or actual["manifest"] != record["plan"]:
         raise ValueError("Plan does not match the declared ratio, pool and order")
@@ -256,23 +297,25 @@ def check_name(run, factors, tokens, within_seed):
         factors.get("flow_binding"),
     ) != (0, 2, 1, 0, 1, 1, "occurrence"):
         raise ValueError("Expected ratio-curriculum/aexpert/VLM2/P1/D0/E1/T1/occurrence name and config")
-    direction, easy, hard, seed, repeat = match.groups()
-    settings = load_plan(factors["order_plan"])["manifest"]["difficulty_sampling"]
-    if f"{direction}-e{easy}-h{hard}-S{seed}" != label(
-        settings["direction"], settings["easy_percent"], settings["sample_seed"]
+    direction, easy, hard, seed, budget_tag, repeat = match.groups()
+    info = load_plan(factors["order_plan"])["manifest"]
+    settings = info["difficulty_sampling"]
+    if f"{direction}-e{easy}-h{hard}-S{seed}{budget_tag or ''}" != label(
+        settings["direction"], settings["easy_percent"], settings["sample_seed"], info["steps"]
     ):
-        raise ValueError("Run name disagrees with the saved ratio, direction or sample seed")
+        raise ValueError("Run name disagrees with the saved ratio, direction, sample seed or steps")
     return int(repeat)
 
 
 def check_checkpoint(directory, run):
     directory, run = Path(directory).resolve(), Path(run).resolve()
     record = check(directory)
-    checkpoint = run / "checkpoints/003000/pretrained_model"
+    steps = record["plan"]["steps"]
+    checkpoint = run / f"checkpoints/{steps:06d}/pretrained_model"
     config = sources.read_json(checkpoint / "train_config.json")
     factors, policy = config["pdet"], config["policy"]
     check_name(run, factors, policy["num_vlm_prompt_tokens"], 0)
-    if (config["seed"], config["steps"], config["batch_size"]) != (0, 3000, 32) or (
+    if (config["seed"], config["steps"], config["batch_size"]) != (0, steps, 32) or (
         not factors["enabled"] or Path(factors["order_plan"]).resolve() != directory / "plan.npz"
     ):
         raise ValueError("Checkpoint changed the budget, seed or curriculum plan")
@@ -288,7 +331,7 @@ def check_checkpoint(directory, run):
     validate_checkpoint(
         checkpoint, 2, source=Path(record["pair"]) / "libero", kind="base", train_action_expert=True
     )
-    return {"checkpoint": "passed", "run": str(run), **record["settings"]}
+    return {"checkpoint": "passed", "run": str(run), "steps": steps, **record["settings"]}
 
 
 def audit(directory, run):
@@ -297,15 +340,30 @@ def audit(directory, run):
     record = check(directory)
     check_checkpoint(directory, run)
     reference = Path(record["reference_run"])
-    old, old_report = inspect_run(reference, name_checker=sources.check_name)
-    new, new_report = inspect_run(run, name_checker=check_name)
-    code, pools = {}, {}
-    for name, invariant, expert in (("reference", old, False), ("curriculum", new, True)):
+    ref_manifest = sources.read_json(reference / "pdet/manifest-rank0.json")
+    reference_steps, steps = ref_manifest["total_steps"], record["plan"]["steps"]
+    shared_count = min(reference_steps, steps) * record["plan"]["batch_size"] * record["plan"]["world_size"]
+    old, old_report = inspect_run(reference, name_checker=sources.check_name, bank_prefix_count=shared_count)
+    new, new_report = inspect_run(run, name_checker=check_name, bank_prefix_count=shared_count)
+    code, pools, tasks = {}, {}, {}
+    for name, invariant, expert, budget in (
+        ("reference", old, False, reference_steps),
+        ("curriculum", new, True, steps),
+    ):
         code[name] = {key: invariant.pop(key) for key in ("git_commit", "source_tree_sha256")}
         pools[name] = invariant.pop(
             "pool"
         )  # Explicitly changed by resampling, not silently treated as fixed.
         invariant.pop("experiment")
+        # Plan/check/inspect_run have verified the complete task schedule, including
+        # its extension. Only normalize the explicitly declared budget differences.
+        tasks[name] = invariant.pop("tasks")
+        if invariant.pop("total_steps") != budget or invariant["recipe"].pop("steps") != budget:
+            raise ValueError("Recorded step budget differs from the plan")
+        if invariant["factors"].pop("audit_steps") != budget:
+            raise ValueError("Expected all-step audit at exactly the configured training budget")
+        if "save_freq" in invariant["recipe"] and invariant["recipe"].pop("save_freq") != budget:
+            raise ValueError("Unexpected checkpoint save frequency")
         policy = invariant["recipe"]["policy"]
         if policy.get("train_action_expert", False) != expert or policy.get("vlm_prompt_only") != (
             not expert
@@ -316,14 +374,17 @@ def audit(directory, run):
     if old != new:
         changed = [key for key in old.keys() | new.keys() if old.get(key) != new.get(key)]
         raise ValueError(f"Unexpected changes beyond resampling, order and action-expert training: {changed}")
-    if old_report["bank_sha256"] != new_report["bank_sha256"]:
-        raise ValueError("Realized indexed noise/time bank changed")
+    if old_report["bank_prefix_sha256"] != new_report["bank_prefix_sha256"]:
+        raise ValueError("Realized indexed noise/time bank changed on shared keys")
     assert_same_processors(
-        reference / "checkpoints/003000/pretrained_model", Path(run) / "checkpoints/003000/pretrained_model"
+        reference / f"checkpoints/{reference_steps:06d}/pretrained_model",
+        Path(run) / f"checkpoints/{steps:06d}/pretrained_model",
     )
     return {
         "audit": "inputs_and_recipe_passed",
         "settings": record["settings"],
+        "steps": steps,
+        "reference_steps": reference_steps,
         "exposure": record["plan"]["difficulty_sampling"],
         "reference": old_report,
         "curriculum": new_report,
@@ -331,15 +392,21 @@ def audit(directory, run):
             "easy_hard_resampling",
             record["settings"]["direction"],
             "full_action_expert_training",
-        ],
+        ]
+        + (["training_budget"] if steps != reference_steps else []),
         "sample_pools": pools,
+        "task_schedules": tasks,
+        "bank_comparison": {
+            "shared_keys": shared_count,
+            "new_keys_without_historical_reference": max(0, new_report["occurrences"] - shared_count),
+        },
         "code_revision": {
             **code,
             "status": "same_recorded_code"
             if code["reference"] == code["curriculum"]
             else "different_not_certified",
         },
-        "scope": "All realized uses: planned ratio/order/task slots, same indexed E1/T1 bank and P1/recipe except declared interventions. Resampling changes sample-to-noise pairing; not historical code equivalence or numerical determinism.",
+        "scope": "All realized uses: planned budget/ratio/order/task slots and P1/recipe except declared interventions. Shared E1/T1 keys match reference; extended bank keys have trace coverage but no historical counterpart. Resampling changes sample-to-noise pairing; not historical code equivalence or numerical determinism.",
     }
 
 
@@ -355,6 +422,7 @@ def main():
         cmd.add_argument("--direction", choices=DIRECTIONS, required=True)
         cmd.add_argument("--easy-percent", type=int, required=True)
         cmd.add_argument("--sample-seed", type=int, default=0)
+        cmd.add_argument("--steps", type=int, default=6000)
     sub.add_parser("check").add_argument("directory", type=Path)
     for command in ("check-checkpoint", "audit"):
         cmd = sub.add_parser(command)
@@ -362,7 +430,7 @@ def main():
         cmd.add_argument("run", type=Path)
     args = parser.parse_args()
     if args.command == "label":
-        print(label(args.direction, args.easy_percent, args.sample_seed))
+        print(label(args.direction, args.easy_percent, args.sample_seed, args.steps))
         return
     if args.command == "prepare":
         result = prepare(
@@ -373,6 +441,7 @@ def main():
             direction=args.direction,
             easy_percent=args.easy_percent,
             sample_seed=args.sample_seed,
+            steps=args.steps,
         )
     elif args.command == "check":
         record = check(args.directory)

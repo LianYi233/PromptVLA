@@ -30,17 +30,20 @@ TRAIN = ROOT / "examples/training/train_pi05_ratio_curriculum.sh"
 EVAL = ROOT / "run_eval_libero_ratio_curriculum.sh"
 
 
-def run_name(direction="easy_to_hard", percent=70, seed=0):
-    return f"pi05-curriculum-{experiment.label(direction, percent, seed)}-aexpert-r1-libero-Bocc-base-vlm2-P1-D0-E1-T1"
+def run_name(direction="easy_to_hard", percent=70, seed=0, steps=3000):
+    return f"pi05-curriculum-{experiment.label(direction, percent, seed, steps)}-aexpert-r1-libero-Bocc-base-vlm2-P1-D0-E1-T1"
 
 
 @pytest.mark.parametrize("direction", experiment.DIRECTIONS)
 @pytest.mark.parametrize("percent", [30, 50, 70, 80])
-def test_exposure_order_coverage_and_fixed_budget(tmp_path, direction, percent):
+@pytest.mark.parametrize("steps", [20, 30, 40])
+def test_exposure_order_coverage_and_fixed_budget(tmp_path, direction, percent, steps):
     base, scores, manifest = small_inputs()
     before = copy.deepcopy(base)
     np_state, torch_state = np.random.get_state(), torch.get_rng_state().clone()
-    plan = experiment.make_plan(base, scores, manifest, direction=direction, easy_percent=percent)
+    plan = experiment.make_plan(
+        base, scores, manifest, direction=direction, easy_percent=percent, steps=steps
+    )
     np.testing.assert_equal(np_state, np.random.get_state())
     assert torch.equal(torch_state, torch.get_rng_state())
     assert base["manifest"] == before["manifest"]
@@ -49,10 +52,11 @@ def test_exposure_order_coverage_and_fixed_budget(tmp_path, direction, percent):
     path = tmp_path / "plan.npz"
     save_plan(path, plan)
     plan = load_plan(path)
-    validate_plan_dataset(plan, {k: scores[k] for k in META_COLUMNS}, steps=20, batch_size=2, world_size=2)
-    np.testing.assert_array_equal(plan["task_index"], base["task_index"])
-    np.testing.assert_array_equal(plan["task_index"][plan["order"]], base["task_index"])
-    assert len(plan["order"]) == len(base["order"]) == 80
+    validate_plan_dataset(plan, {k: scores[k] for k in META_COLUMNS}, steps=steps, batch_size=2, world_size=2)
+    expected_tasks = np.resize(base["task_index"], steps * 4)
+    np.testing.assert_array_equal(plan["task_index"], expected_tasks)
+    np.testing.assert_array_equal(plan["task_index"][plan["order"]], expected_tasks)
+    assert len(plan["order"]) == steps * 4
     easy = experiment.partition(base, scores, manifest)
     assert easy[plan["index"]].sum() == round(len(plan["order"]) * percent / 100)
     for task in np.unique(plan["task_index"]):
@@ -64,17 +68,19 @@ def test_exposure_order_coverage_and_fixed_budget(tmp_path, direction, percent):
         assert (np.diff(groups) <= 0).all() if direction == "easy_to_hard" else (np.diff(groups) >= 0).all()
         assert abs(groups.sum() - len(slots) * percent / 100) < 1
         for group in (False, True):
-            candidates = base["index"][slots][easy[base["index"][slots]] == group]
+            candidates = base["index"][base["task_index"] == task]
+            candidates = candidates[easy[candidates] == group]
             selected = frames[easy[frames] == group]
             assert set(selected) <= set(candidates)
             if len(selected) >= len(candidates):
                 assert set(selected) == set(candidates)
 
 
-def test_direction_only_keeps_new_sample_flow_pairs_and_repeats_get_distinct_draws():
+@pytest.mark.parametrize("steps", [20, 40])
+def test_direction_only_keeps_new_sample_flow_pairs_and_repeats_get_distinct_draws(steps):
     base, scores, manifest = small_inputs()
     plans = [
-        experiment.make_plan(base, scores, manifest, direction=d, easy_percent=70)
+        experiment.make_plan(base, scores, manifest, direction=d, easy_percent=70, steps=steps)
         for d in experiment.DIRECTIONS
     ]
     assert plans[0]["manifest"]["instance_pool_sha256"] == plans[1]["manifest"]["instance_pool_sha256"]
@@ -127,19 +133,22 @@ def test_bad_scores_and_changed_metadata_rejected():
         experiment.partition(base, scores, manifest)
 
 
-def test_prepare_reuses_only_identical_settings_and_detects_resigned_tampering(prepared_inputs):
+@pytest.mark.parametrize("steps", [3000, 6000])
+def test_prepare_reuses_only_identical_settings_and_detects_resigned_tampering(prepared_inputs, steps):
     args = prepared_inputs
-    settings = {"direction": "easy_to_hard", "easy_percent": 70}
+    settings = {"direction": "easy_to_hard", "easy_percent": 70, "steps": steps}
     assert experiment.prepare(**args, **settings)["prepared"] == "passed"
     assert experiment.prepare(**args, **settings)["prepared"] == "reused"
     record = experiment.check(args["output"])
     with (args["output"] / "schedule.csv").open() as handle:
         rows = list(csv.DictReader(handle))
-    assert len(rows) == 3000
-    assert sum(int(row["easy_uses"]) for row in rows) == 134400
-    assert sum(int(row["hard_uses"]) for row in rows) == 57600
+    assert len(rows) == steps
+    assert sum(int(row["easy_uses"]) for row in rows) == steps * 64 * 70 // 100
+    assert sum(int(row["hard_uses"]) for row in rows) == steps * 64 * 30 // 100
     with pytest.raises(ValueError, match="different settings"):
         experiment.prepare(**args, direction="hard_to_easy", easy_percent=70)
+    with pytest.raises(ValueError, match="different settings"):
+        experiment.prepare(**args, **(settings | {"steps": steps + 1000}))
     plan_path = args["output"] / "plan.npz"
     plan = load_plan(plan_path)
     slots = np.flatnonzero(plan["task_index"] == plan["task_index"][0])
@@ -175,13 +184,18 @@ def launcher_env(args, tmp_path):
     "direction,percent,gpus,port",
     [("easy_to_hard", 70, "0,1", "29584"), ("hard_to_easy", 30, "2,3", "29585")],
 )
-def test_actual_training_dry_run_and_no_overwrite(prepared_inputs, tmp_path, direction, percent, gpus, port):
+@pytest.mark.parametrize("steps", [3000, 6000])
+def test_actual_training_dry_run_and_no_overwrite(
+    prepared_inputs, tmp_path, direction, percent, gpus, port, steps
+):
     args = prepared_inputs
     env = launcher_env(args, tmp_path) | {
         "CURRICULUM_DIRECTION": direction,
         "GPU_IDS": gpus,
         "MAIN_PROCESS_PORT": port,
     }
+    if steps != 6000:
+        env["FLOW_STEPS"] = str(steps)
     result = subprocess.run(
         ["bash", str(TRAIN), "--wandb.project=prompt-learning"],
         env=env,
@@ -200,7 +214,9 @@ def test_actual_training_dry_run_and_no_overwrite(prepared_inputs, tmp_path, dir
     assert flags["policy.num_vlm_prompt_tokens"] == "2"
     assert flags["policy.num_prompt_tokens"] == "0"
     assert flags["policy.compile_model"] == "false"
-    assert flags["steps"] == flags["save_freq"] == "3000"
+    assert flags["steps"] == flags["save_freq"] == flags["pdet.audit_steps"] == str(steps)
+    assert flags["policy.scheduler_warmup_steps"] == "1000"
+    assert flags["policy.scheduler_decay_steps"] == "30000"
     assert flags["policy.ntk_save_stage_snapshots"] == "false"
     assert flags["save_steps"] == "[]"
     assert flags["batch_size"] == "32" and flags["num_processes"] == "2"
@@ -209,20 +225,22 @@ def test_actual_training_dry_run_and_no_overwrite(prepared_inputs, tmp_path, dir
     assert flags["pdet.order_plan"] == str(args["output"] / "plan.npz")
     assert flags["pdet.flow_binding"] == "occurrence"
     assert flags["pdet.noise_seed"] == flags["pdet.time_seed"] == "1"
-    assert Path(flags["output_dir"]).name == run_name(direction, percent)
+    assert Path(flags["output_dir"]).name == run_name(direction, percent, steps=steps)
     assert not (tmp_path / "runs").exists()
-    (tmp_path / "runs" / run_name(direction, percent)).mkdir(parents=True)
+    (tmp_path / "runs" / run_name(direction, percent, steps=steps)).mkdir(parents=True)
     result = subprocess.run(["bash", str(TRAIN)], env=env, capture_output=True, text=True)
     assert result.returncode != 0 and "Output already exists" in result.stderr
 
 
-def test_saved_checkpoint_and_full_evaluator_chain(prepared_inputs, tmp_path):
+@pytest.mark.parametrize("steps", [3000, 6000])
+def test_saved_checkpoint_and_full_evaluator_chain(prepared_inputs, tmp_path, steps):
     args = prepared_inputs
-    experiment.prepare(**args, direction="easy_to_hard", easy_percent=70)
-    run = tmp_path / run_name()
-    checkpoint = run / "checkpoints/003000/pretrained_model"
+    experiment.prepare(**args, direction="easy_to_hard", easy_percent=70, steps=steps)
+    run = tmp_path / run_name(steps=steps)
+    checkpoint = run / f"checkpoints/{steps:06d}/pretrained_model"
     shutil.copytree(args["reference"] / "checkpoints/003000/pretrained_model", checkpoint)
     config = sources.read_json(checkpoint / "train_config.json")
+    config.update(steps=steps, save_freq=steps)
     config["pdet"].update(enabled=True, order_plan=str(args["output"] / "plan.npz"))
     config["policy"].update(train_action_expert=True, vlm_prompt_only=False)
     (checkpoint / "train_config.json").write_text(json.dumps(config))
@@ -238,7 +256,7 @@ def test_saved_checkpoint_and_full_evaluator_chain(prepared_inputs, tmp_path):
         weights[f"model.{prefix}.weight"] = np.ones((2, 2), dtype=np.float32)
     save_file(weights, checkpoint / "model.safetensors")
     assert experiment.check_checkpoint(args["output"], run)["easy_percent"] == 70
-    wrong_name = tmp_path / run_name(percent=30)
+    wrong_name = tmp_path / run_name(percent=30, steps=steps)
     run.rename(wrong_name)
     with pytest.raises(ValueError, match="disagrees"):
         experiment.check_checkpoint(args["output"], wrong_name)
@@ -249,8 +267,8 @@ def test_saved_checkpoint_and_full_evaluator_chain(prepared_inputs, tmp_path):
         experiment.check_checkpoint(args["output"], run)
     config["keyframe_loss"] = {"mode": "off"}
     (checkpoint / "train_config.json").write_text(json.dumps(config))
-    (run / "checkpoints/last").symlink_to("003000")
-    env = launcher_env(args, tmp_path) | {"CKPT_ROOT": str(tmp_path), "GPU_ID": "3"}
+    (run / "checkpoints/last").symlink_to(f"{steps:06d}")
+    env = launcher_env(args, tmp_path) | {"CKPT_ROOT": str(tmp_path), "GPU_ID": "3", "FLOW_STEPS": str(steps)}
     result = subprocess.run(["bash", str(EVAL), "all"], env=env, capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "train_action_expert=True" in result.stdout
@@ -258,15 +276,22 @@ def test_saved_checkpoint_and_full_evaluator_chain(prepared_inputs, tmp_path):
     assert "--policy.vlm_prompt_only=true" not in result.stdout
 
 
-def test_all_step_audit_allows_only_declared_pool_scope_order_changes(tmp_path, monkeypatch):
+@pytest.mark.parametrize("steps", [20, 40])
+def test_all_step_audit_allows_only_declared_pool_scope_order_changes(tmp_path, monkeypatch, steps):
     base, scores, manifest = small_inputs()
-    changed = experiment.make_plan(base, scores, manifest, direction="easy_to_hard", easy_percent=70)
+    changed = experiment.make_plan(
+        base, scores, manifest, direction="easy_to_hard", easy_percent=70, steps=steps
+    )
     monkeypatch.setattr(
         "lerobot.utils.pdet_order.read_frame_metadata", lambda _: {k: scores[k] for k in META_COLUMNS}
     )
     policy = TinyPolicy()
-    runs = [tmp_path / "pi05-source-r1-libero-W0-Bocc-base-vlm2-P1-D0-E1-T1", tmp_path / run_name()]
+    runs = [
+        tmp_path / "pi05-source-r1-libero-W0-Bocc-base-vlm2-P1-D0-E1-T1",
+        tmp_path / run_name(steps=steps),
+    ]
     for run, plan in zip(runs, (base, changed), strict=True):
+        budget = plan["manifest"]["steps"]
         plan_path = tmp_path / f"{run.name}.npz"
         save_plan(plan_path, plan)
         cfg = make_config(
@@ -278,20 +303,21 @@ def test_all_step_audit_allows_only_declared_pool_scope_order_changes(tmp_path, 
                 noise_seed=1,
                 time_seed=1,
                 order_plan=str(plan_path),
-                audit_steps=20,
+                audit_steps=budget,
                 diagnostics=True,
             ),
         )
-        cfg.steps, cfg.batch_size, cfg.dataset.root = 20, 2, tmp_path / "data"
+        cfg.steps, cfg.batch_size, cfg.dataset.root = budget, 2, tmp_path / "data"
         expert = run == runs[1]
-        cfg.to_dict = lambda expert=expert: {
+        cfg.to_dict = lambda expert=expert, budget=budget: {
             "seed": 0,
-            "steps": 20,
+            "steps": budget,
+            "save_freq": budget,
             "policy": {"vlm_prompt_only": not expert, "train_action_expert": expert},
         }
         for rank in (0, 1):
             streams = PDETStreams(cfg, policy, accelerator(rank))
-            for step in range(20):
+            for step in range(budget):
                 start = (step * 2 + rank) * 2
                 ids = plan["order"][start : start + 2].tolist()
                 streams.draw(
@@ -311,10 +337,32 @@ def test_all_step_audit_allows_only_declared_pool_scope_order_changes(tmp_path, 
     report = experiment.audit(tmp_path, runs[1])
     assert report["audit"] == "inputs_and_recipe_passed"
     assert report["sample_pools"]["reference"] != report["sample_pools"]["curriculum"]
-    assert report["reference"]["bank_sha256"] == report["curriculum"]["bank_sha256"]
+    assert report["reference"]["bank_prefix_sha256"] == report["curriculum"]["bank_prefix_sha256"]
+    assert report["bank_comparison"]["shared_keys"] == 80
+    assert report["bank_comparison"]["new_keys_without_historical_reference"] == (steps - 20) * 4
+    assert ("training_budget" in report["interventions"]) == (steps != 20)
     path = runs[1] / "pdet/inputs-rank1.jsonl"
     rows = [json.loads(line) for line in path.read_text().splitlines()]
-    rows[-1]["occurrence_noise_sha256"][0] = "0" * 64
+    row = next(row for row in rows if min(row["occurrence_ids"]) < 80)
+    i = next(i for i, key in enumerate(row["occurrence_ids"]) if key < 80)
+    row["occurrence_noise_sha256"][i] = "0" * 64
     path.write_text("\n".join(map(json.dumps, rows)) + "\n")
     with pytest.raises(ValueError, match="bank changed"):
         experiment.audit(tmp_path, runs[1])
+
+
+def test_legacy_plan_and_labels_are_unchanged():
+    base, scores, manifest = small_inputs()
+    plan = experiment.make_plan(base, scores, manifest, direction="easy_to_hard", easy_percent=70)
+    assert (
+        plan["manifest"]["arrays_sha256"]
+        == "49489faf8f678911f3822e7aa7e7315e844364a88298437a81796063aabd744e"
+    )
+    assert experiment.label("easy_to_hard", 70, 0, 3000) == "E2H-e70-h30-S0"
+    assert experiment.label("easy_to_hard", 70, 0, 6000) == "E2H-e70-h30-S0-steps6000"
+
+
+@pytest.mark.parametrize("steps", [0, -1, 6000.5, True])
+def test_invalid_budget(steps):
+    with pytest.raises(ValueError, match="positive integer"):
+        experiment.label("easy_to_hard", 70, 0, steps)
