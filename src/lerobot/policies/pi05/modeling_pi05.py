@@ -801,15 +801,20 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         self._freeze_backbones()
 
     def _freeze_backbones(self) -> None:
-        """Freeze backbones, preserving active prompts and opt-in action projections.
+        """Freeze VLM, preserving prompts and the explicitly selected action modules.
 
         Preserve PEFT's active modules_to_save selection: its original prompt copies must stay
         frozen. Autograd remains enabled through both backbones to reach the input prompts.
         """
         trainable_ids = set()
         trainable_modules = [self.vlm_prompt_tokens, self.prompt_tokens]
-        if getattr(self.config, "train_action_projections", False):
+        full_expert = getattr(self.config, "train_action_expert", False)
+        if getattr(self.config, "train_action_projections", False) or full_expert:
             trainable_modules.extend([self.action_in_proj, self.action_out_proj])
+        if full_expert:
+            trainable_modules.extend(
+                [self.paligemma_with_expert.gemma_expert.model, self.time_mlp_in, self.time_mlp_out]
+            )
         for module in trainable_modules:
             modules_to_save = getattr(module, "modules_to_save", None)
             if modules_to_save is None:
@@ -834,6 +839,8 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
                 parameter.grad = None
         self.paligemma_with_expert.paligemma.eval()
         self.paligemma_with_expert.gemma_expert.eval()
+        if full_expert:
+            self.paligemma_with_expert.gemma_expert.model.train(self.training)
 
     def train(self, mode: bool = True):
         super().train(mode)
@@ -1713,6 +1720,11 @@ class PI05Policy(PreTrainedPolicy):
 
     def get_optim_params(self):
         self.model._freeze_vlm()
+        if getattr(self.config, "train_action_expert", False):
+            from lerobot.utils.pi05_trainable import validate_vlm_trainables
+
+            validate_vlm_trainables(self)
+            return [parameter for parameter in self.parameters() if parameter.requires_grad]
         if getattr(self.config, "vlm_prompt_only", False):
             parameters = [parameter for parameter in self.parameters() if parameter.requires_grad]
             prompt = self.model.vlm_prompt_tokens.weight

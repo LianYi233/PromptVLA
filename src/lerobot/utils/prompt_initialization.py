@@ -117,13 +117,13 @@ def apply_initial_prompt(policy, path: str | Path) -> dict:
     """
     import torch
 
+    from lerobot.utils.pi05_trainable import is_vlm_adaptation, validate_vlm_trainables
+
     config = policy.config
-    if not getattr(config, "vlm_prompt_only", False) or getattr(config, "num_prompt_tokens", None) != 0:
-        raise ValueError("Prompt initialization import requires native PI05 VLM-only training")
+    if not is_vlm_adaptation(config) or getattr(config, "num_prompt_tokens", None) != 0:
+        raise ValueError("Prompt initialization import requires native PI05 VLM adaptation")
     parameter = policy.model.vlm_prompt_tokens.weight
-    trainable = [p for p in policy.parameters() if p.requires_grad]
-    if len(trainable) != 1 or trainable[0] is not parameter:
-        raise ValueError("Only the VLM prompt may be trainable when importing initialization")
+    validate_vlm_trainables(policy)
     prompt, metadata = read_initial_prompt(path, config.num_vlm_prompt_tokens)
     if tuple(parameter.shape) != tuple(prompt.shape):
         raise ValueError(f"Prompt shape mismatch: {tuple(parameter.shape)} vs {prompt.shape}")

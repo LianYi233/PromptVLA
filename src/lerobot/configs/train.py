@@ -285,32 +285,36 @@ class TrainPipelineConfig(HubMixin):
                 active_cfg.num_vlm_prompt_tokens,
             )
         if self.vlm_prompt_init_path is not None:
+            from lerobot.utils.pi05_trainable import is_vlm_adaptation
+
             if (
                 self.is_reward_model_training
                 or active_cfg.type != "pi05"
-                or not getattr(active_cfg, "vlm_prompt_only", False)
+                or not is_vlm_adaptation(active_cfg)
                 or self.peft is not None
                 or active_cfg.use_peft
                 or active_cfg.compile_model
             ):
-                raise ValueError(
-                    "vlm_prompt_init_path requires native PI05 VLM-only training without compile"
-                )
+                raise ValueError("vlm_prompt_init_path requires native PI05 VLM adaptation without compile")
             if not self.resume:
                 from lerobot.utils.prompt_initialization import read_initial_prompt
 
                 read_initial_prompt(self.vlm_prompt_init_path, active_cfg.num_vlm_prompt_tokens)
         if self.prompt_rank.freq > 0:
+            from lerobot.utils.pi05_trainable import is_vlm_adaptation
+
             if (
                 self.is_reward_model_training
                 or active_cfg.type != "pi05"
-                or not getattr(active_cfg, "vlm_prompt_only", False)
+                or not is_vlm_adaptation(active_cfg)
                 or self.dataset.streaming
                 or self.peft is not None
                 or active_cfg.use_peft
                 or self.rename_map
             ):
-                raise ValueError("prompt_rank requires native PI05 VLM-only and a non-streaming dataset")
+                raise ValueError(
+                    "prompt_rank requires native PI05 VLM adaptation and a non-streaming dataset"
+                )
             if active_cfg.compile_model:
                 raise ValueError("prompt_rank requires --policy.compile_model=false")
         if self.preserve_pretrained_normalization and (

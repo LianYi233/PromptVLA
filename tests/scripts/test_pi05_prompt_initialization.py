@@ -59,7 +59,10 @@ def training_draws():
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_swap_preserves_rng_future_flow_draws_parameter_identity_and_frozen_weights(tmp_path, dtype):
+@pytest.mark.parametrize("full_expert", [False, True])
+def test_swap_preserves_rng_future_flow_draws_parameter_identity_and_frozen_weights(
+    tmp_path, dtype, full_expert
+):
     original = np.random.default_rng(1).normal(0, 0.02, (2, 2048)).astype(np.float32)
     prompt = torch.from_numpy(original).to(dtype=dtype).float().numpy()
     path, prompt, _ = packet(tmp_path, prompt)
@@ -67,6 +70,15 @@ def test_swap_preserves_rng_future_flow_draws_parameter_identity_and_frozen_weig
     np.random.seed(0)
     torch.manual_seed(0)
     policy = Policy(dtype)
+    if full_expert:
+        policy.config.vlm_prompt_only = False
+        policy.config.train_action_expert = True
+        policy.model.paligemma_with_expert = torch.nn.Module()
+        policy.model.paligemma_with_expert.gemma_expert = torch.nn.Module()
+        policy.model.paligemma_with_expert.gemma_expert.model = torch.nn.Linear(4, 4)
+        for name in ("action_in_proj", "action_out_proj", "time_mlp_in", "time_mlp_out"):
+            setattr(policy.model, name, torch.nn.Linear(4, 4))
+    other_weights = {n: p.clone() for n, p in policy.named_parameters() if "vlm_prompt_tokens" not in n}
     parameter = policy.model.vlm_prompt_tokens.weight
     optimizer = torch.optim.AdamW([parameter], lr=1e-3)
     backbone = {name: value.clone() for name, value in policy.model.backbone.state_dict().items()}
@@ -76,6 +88,7 @@ def test_swap_preserves_rng_future_flow_draws_parameter_identity_and_frozen_weig
     np.random.set_state(states[1])
     torch.set_rng_state(states[2])
     record = apply_initial_prompt(policy, path)
+    assert all(torch.equal(other_weights[n], p) for n, p in policy.named_parameters() if n in other_weights)
     # Persistence must not advance RNG either.
     save_import_record(policy, record, tmp_path / "new_run", 0)
     assert random.getstate() == states[0]
@@ -179,7 +192,7 @@ def test_precision_loss_and_unfrozen_backbone_fail_before_mutation(tmp_path):
         apply_initial_prompt(policy, path)
     assert torch.equal(policy.model.vlm_prompt_tokens.weight, original)
     policy.model.backbone.requires_grad_(True)
-    with pytest.raises(ValueError, match="Only the VLM prompt"):
+    with pytest.raises(ValueError, match="Trainable partition mismatch"):
         apply_initial_prompt(policy, path)
 
 

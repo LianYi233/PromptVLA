@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from lerobot.utils.pi05_trainable import is_vlm_adaptation
+
 if TYPE_CHECKING:
     from lerobot.configs.train import TrainPipelineConfig
 
@@ -49,7 +51,7 @@ class PDETConfig:
         if (
             cfg.is_reward_model_training
             or policy.type != "pi05"
-            or not getattr(policy, "vlm_prompt_only", False)
+            or not is_vlm_adaptation(policy)
             or policy.num_prompt_tokens != 0
             or policy.compile_model
             or policy.use_peft
@@ -69,7 +71,7 @@ class PDETConfig:
             or not 0 <= cfg.seed < 2**32
         ):
             raise ValueError(
-                "PDET requires seeded native VLM-only flow with imported P, no compile/PEFT/"
+                "PDET requires seeded native VLM adaptation flow with imported P, no compile/PEFT/"
                 "priming/bridge, and a non-streaming dataset without augmentation or online evaluation"
             )
         if self.order_plan is not None:

@@ -7,6 +7,8 @@ if [[ "${1:-}" == -h || "${1:-}" == --help ]]; then
 Usage: bash examples/training/train_pi05_vlm_only.sh base|finetuned [SEED] [extra args...]
 PI05 + one VLM prompt bank; default 1 token, action prompts=0, all other weights frozen.
 Ordinary flow only: no CABO, priming, bridge, LoRA or action projection training.
+TRAIN_ACTION_EXPERT=true explicitly selects VLM prompt + full action network instead;
+it requires a distinct RUN_NAME and cannot export a prompt-only initialization.
 Defaults: 3000 steps, batch 32 PER GPU, bf16, W&B online/project prompt-learning.
 SAVE_ONLY_FINAL=true saves only the final checkpoint (003000 by default), including no step-0 snapshot.
 base uses dataset QUANTILES (as in the earlier ablation); finetuned keeps v044's saved MEAN_STD.
@@ -43,6 +45,16 @@ for arg in "${EXTRA_ARGS[@]}"; do
   esac
 done
 VLM_PROMPT_TOKENS="${VLM_PROMPT_TOKENS:-1}"
+TRAIN_ACTION_EXPERT="${TRAIN_ACTION_EXPERT:-false}"
+case "$TRAIN_ACTION_EXPERT" in
+  false) VLM_ONLY=true ;;
+  true)
+    VLM_ONLY=false
+    [[ -n "${RUN_NAME:-}" && -z "${PROMPT_EXPORT_PATH:-}" ]] || {
+      echo 'Action-expert training requires explicit RUN_NAME and forbids prompt-only export' >&2; exit 2;
+    } ;;
+  *) echo 'TRAIN_ACTION_EXPERT must be true or false' >&2; exit 2 ;;
+esac
 FLOW_STEPS="${FLOW_STEPS:-3000}"; SAVE_FREQ="${SAVE_FREQ:-1000}"; BATCH_SIZE="${BATCH_SIZE:-32}"
 SAVE_ONLY_FINAL="${SAVE_ONLY_FINAL:-false}"
 case "$SAVE_ONLY_FINAL" in
@@ -111,7 +123,7 @@ TRAIN_ARGS=(
   --policy.path="$PRETRAINED_PATH" --policy.tokenizer_name="$TOKENIZER_PATH"
   --policy.device=cuda --policy.dtype="$DTYPE" --policy.use_amp=false
   --policy.compile_model=true --policy.gradient_checkpointing=true
-  --policy.vlm_prompt_only=true --policy.num_vlm_prompt_tokens="$VLM_PROMPT_TOKENS"
+  --policy.vlm_prompt_only="$VLM_ONLY" --policy.num_vlm_prompt_tokens="$VLM_PROMPT_TOKENS"
   --policy.num_prompt_tokens=0 --policy.training_stage=flow
   --policy.next_action_pretrain_steps=0 --policy.next_action_bridge_steps=0
   --policy.cabo_enabled=false --policy.train_action_projections=false --policy.use_peft=false
@@ -126,13 +138,18 @@ TRAIN_ARGS=(
   --wandb.enable=true --wandb.project=prompt-learning --wandb.mode=online --wandb.disable_artifact=true
 )
 if [[ -n "${PROMPT_INIT_PATH:-}" ]]; then TRAIN_ARGS+=(--vlm_prompt_init_path="$PROMPT_INIT_PATH"); fi
+if [[ "$TRAIN_ACTION_EXPERT" == true ]]; then TRAIN_ARGS+=(--policy.train_action_expert=true); fi
 if [[ -n "${PROMPT_EXPORT_PATH:-}" ]]; then TRAIN_ARGS+=(--vlm_prompt_export_path="$PROMPT_EXPORT_PATH"); fi
 if [[ -n "${PROMPT_EXPORT_REFERENCE:-}" ]]; then TRAIN_ARGS+=(--vlm_prompt_export_reference="$PROMPT_EXPORT_REFERENCE"); fi
 if [[ "$SAVE_ONLY_FINAL" == true ]]; then TRAIN_ARGS+=(--save_steps='[]'); fi
 LAUNCH_ARGS=(launch --num_machines=1 --num_processes="$NUM_PROCESSES" --mixed_precision="$PRECISION"
   --main_process_port="$MAIN_PROCESS_PORT" --dynamo_backend=no)
 if (( NUM_PROCESSES > 1 )); then LAUNCH_ARGS+=(--multi_gpu); fi
-echo "source=$SOURCE VLM=$VLM_PROMPT_TOKENS action=0 trainable=$((VLM_PROMPT_TOKENS * 2048)) dtype=$DTYPE"
+if [[ "$TRAIN_ACTION_EXPERT" == true ]]; then
+  echo "source=$SOURCE VLM=$VLM_PROMPT_TOKENS action_prompts=0 trainable=VLM-prompt+action-transformer+action-maps+time-MLPs dtype=$DTYPE"
+else
+  echo "source=$SOURCE VLM=$VLM_PROMPT_TOKENS action=0 trainable=$((VLM_PROMPT_TOKENS * 2048)) dtype=$DTYPE"
+fi
 echo "GPU_IDS=$GPU_IDS per_device_batch=$BATCH_SIZE global_batch=$((BATCH_SIZE * NUM_PROCESSES)) port=$MAIN_PROCESS_PORT"
 if [[ -n "${PROMPT_EXPORT_PATH:-}" ]]; then
   echo "initialization only: export=$PROMPT_EXPORT_PATH (0 updates; no optimizer/probes/full checkpoint/W&B)"

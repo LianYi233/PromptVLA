@@ -21,6 +21,7 @@ import torch
 
 from lerobot.utils.constants import OBS_LANGUAGE_ATTENTION_MASK, OBS_LANGUAGE_TOKENS
 from lerobot.utils.ntk import spectral_metrics
+from lerobot.utils.pi05_trainable import validate_vlm_trainables
 from lerobot.utils.piper_training_eval import evaluation_rng
 
 
@@ -89,17 +90,22 @@ def isolated_prompt(policy):
     Module flags are restored individually, including frozen submodules in eval mode.
     """
     original = policy.model.vlm_prompt_tokens.weight
-    trainable = [p for p in policy.parameters() if p.requires_grad]
-    if len(trainable) != 1 or trainable[0] is not original:
-        raise ValueError("Prompt-rank monitoring requires exactly the VLM prompt to be trainable")
+    validate_vlm_trainables(policy)
+    parameter_flags = [(p, p.requires_grad) for p in policy.parameters()]
     flags = [(module, module.training) for module in policy.modules()]
     try:
+        # Freeze expert leaves during the probe only: no DDP hooks or optimizer
+        # gradients are touched. This still measures d velocity / d VLM prompt.
+        for parameter, _ in parameter_flags:
+            parameter.requires_grad_(False)
         policy.model.vlm_prompt_tokens.weight = torch.nn.Parameter(original.detach().float().clone())
         for module, _ in flags:
             module.training = False
         yield policy.model.vlm_prompt_tokens.weight
     finally:
         policy.model.vlm_prompt_tokens.weight = original
+        for parameter, requires_grad in parameter_flags:
+            parameter.requires_grad_(requires_grad)
         for module, training in flags:
             module.training = training
 

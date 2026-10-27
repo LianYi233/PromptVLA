@@ -167,7 +167,8 @@ def revision_audit(tmp_path, policy, batch):
     def git(*args):
         return subprocess.check_output(
             ["git", "-c", "user.name=Audit Test", "-c", "user.email=audit@example.invalid", *args],
-            cwd=repo, text=True,
+            cwd=repo,
+            text=True,
         ).strip()
 
     git("init", "-q")
@@ -307,7 +308,8 @@ def test_config_roundtrip():
         replace(cfg, time_seed=-1).validate()
 
 
-def test_training_config_validates_prompt_label_and_disallows_augmentation(tmp_path):
+@pytest.mark.parametrize("full_expert", [False, True])
+def test_training_config_validates_prompt_label_and_disallows_augmentation(tmp_path, full_expert):
     from lerobot.configs.train import TrainPipelineConfig
 
     path = tmp_path / "p1.safetensors"
@@ -337,7 +339,8 @@ def test_training_config_validates_prompt_label_and_disallows_augmentation(tmp_p
     cfg = draccus.decode(TrainPipelineConfig, cfg.to_dict())
     cfg.policy = SimpleNamespace(
         type="pi05",
-        vlm_prompt_only=True,
+        vlm_prompt_only=not full_expert,
+        train_action_expert=full_expert,
         num_prompt_tokens=0,
         num_vlm_prompt_tokens=2,
         compile_model=False,

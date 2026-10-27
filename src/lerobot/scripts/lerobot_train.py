@@ -870,7 +870,14 @@ def _train_single_stage(
 
     # TRAINABLE_PARAMETER_REPORT_V1
     if is_main_process:
-        _parameter_counts = {"vlm_prompt": 0, "action_prompt": 0, "action_projection": 0, "other": 0}
+        _parameter_counts = {
+            "vlm_prompt": 0,
+            "action_prompt": 0,
+            "action_projection": 0,
+            "action_expert": 0,
+            "time_mlp": 0,
+            "other": 0,
+        }
         logging.info("========== Trainable parameter report ==========")
         logging.info("Training stage: %s", getattr(cfg.policy, "training_stage", "unknown"))
         for _name, _parameter in policy.named_parameters():
@@ -883,6 +890,10 @@ def _train_single_stage(
                 _category = "action_prompt"
             elif any(part in _name.split(".") for part in ("action_in_proj", "action_out_proj")):
                 _category = "action_projection"
+            elif "gemma_expert" in _name.split("."):
+                _category = "action_expert"
+            elif any(part in _name.split(".") for part in ("time_mlp_in", "time_mlp_out")):
+                _category = "time_mlp"
             else:
                 _category = "other"
             _parameter_counts[_category] += _count
@@ -1154,6 +1165,7 @@ def _train_single_stage(
             {
                 "training_stage": str(active_cfg.training_stage),
                 "train_action_projections": getattr(active_cfg, "train_action_projections", False),
+                "train_action_expert": getattr(active_cfg, "train_action_expert", False),
                 "trainable_parameters": num_learnable_params,
                 "action_names": dataset.meta.features["action"].get("names"),
                 "num_processes": accelerator.num_processes,

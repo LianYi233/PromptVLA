@@ -20,7 +20,7 @@ from lerobot.utils.frameskip_curriculum import load_scores
 from lerobot.utils.pdet_order import META_COLUMNS, arrays_hash, load_plan, save_plan
 
 PROTOCOL = "pi05-hard-to-easy-order-v1"
-NAME = re.compile(r"pi05-hard2easy-r([1-9][0-9]*)-libero-Bocc-base-vlm2-P1-D0-E1-T1")
+NAME = re.compile(r"pi05-hard2easy-(?:aexpert-)?r([1-9][0-9]*)-libero-Bocc-base-vlm2-P1-D0-E1-T1")
 DEFAULT_ROOT = Path("/data1/wyn/prompt-work")
 DEFAULT_REFERENCE = Path(
     "/data1/wyn/chkpt/2601-lerobot/PromptVLA/pi05-source-r1-libero-W0-Bocc-base-vlm2-P1-D0-E1-T1"
@@ -198,8 +198,15 @@ def check_checkpoint(directory, run):
         raise ValueError("Checkpoint changed the training budget, global seed or difficulty plan")
     if (config.get("keyframe_loss") or {}).get("enabled", False):
         raise ValueError("Order-only experiment must not add keyframe loss weighting")
-    validate_checkpoint(checkpoint, 2, source=Path(record["pair"]) / "libero", kind="base")
-    return {"checkpoint": "passed", "run": str(run)}
+    full_expert = run.name.startswith("pi05-hard2easy-aexpert-")
+    if config["policy"].get("train_action_expert", False) != full_expert or config["policy"].get(
+        "vlm_prompt_only"
+    ) != (not full_expert):
+        raise ValueError("Run name disagrees with saved action-expert training scope")
+    validate_checkpoint(
+        checkpoint, 2, source=Path(record["pair"]) / "libero", kind="base", train_action_expert=full_expert
+    )
+    return {"checkpoint": "passed", "run": str(run), "train_action_expert": full_expert}
 
 
 def audit(directory, run):
@@ -214,9 +221,22 @@ def audit(directory, run):
     for label, invariant in (("reference", old), ("hard_to_easy", new)):
         code[label] = {key: invariant.pop(key) for key in ("git_commit", "source_tree_sha256")}
         invariant.pop("experiment")  # Repetition IDs only name outputs.
+    # The optional expert run intentionally changes TWO factors versus the old
+    # prompt-only/random-order reference. Normalize only these verified flags.
+    full_expert = Path(run).name.startswith("pi05-hard2easy-aexpert-")
+    for invariant, expected_expert in ((old, False), (new, full_expert)):
+        policy = invariant["recipe"]["policy"]
+        if policy.get("train_action_expert", False) != expected_expert or (
+            policy.get("vlm_prompt_only") != (not expected_expert)
+        ):
+            raise ValueError("Recorded recipe disagrees with intended trainable scope")
+        policy.pop("train_action_expert", None)
+        policy["vlm_prompt_only"] = True
     if old != new:
         changed = [key for key in old.keys() | new.keys() if old.get(key) != new.get(key)]
-        raise ValueError(f"Something other than order changed in recipe/inputs: {changed}")
+        raise ValueError(
+            f"Unexpected recipe/input changes beyond order and declared trainable scope: {changed}"
+        )
     if old_report["bank_sha256"] != new_report["bank_sha256"]:
         raise ValueError("Realized per-occurrence noise/time bank changed")
     if old_report["order_sha256"] == new_report["order_sha256"]:
@@ -228,13 +248,14 @@ def audit(directory, run):
         "audit": "inputs_and_recipe_passed",
         "reference": old_report,
         "hard_to_easy": new_report,
+        "interventions": ["hard_to_easy_order"] + (["full_action_expert_training"] if full_expert else []),
         "code_revision": {
             **code,
             "status": "same_recorded_code"
             if code["reference"] == code["hard_to_easy"]
             else "different_not_certified",
         },
-        "scope": "All steps: identical task slots, sample-use pool, P1, E1/T1 bank and recipe; order changed. Historical code equivalence/numerical determinism are not certified.",
+        "scope": "All steps: identical task slots, sample-use pool, P1, E1/T1 bank; recipe differs only in declared interventions. Historical code equivalence/numerical determinism are not certified.",
     }
 
 

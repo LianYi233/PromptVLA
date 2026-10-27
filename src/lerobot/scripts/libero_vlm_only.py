@@ -165,14 +165,16 @@ def assert_same_processors(reference, candidate):
                     )
 
 
-def validate_checkpoint(directory, tokens, reference=None, source=None, kind=None):
+def validate_checkpoint(
+    directory, tokens, reference=None, source=None, kind=None, *, train_action_expert=False
+):
     from safetensors import safe_open
 
     directory = Path(directory)
     config = read_json(directory / "config.json")
     expected = {
         "type": "pi05",
-        "vlm_prompt_only": True,
+        "vlm_prompt_only": not train_action_expert,
         "num_vlm_prompt_tokens": tokens,
         "num_prompt_tokens": 0,
         "training_stage": "flow",
@@ -182,6 +184,8 @@ def validate_checkpoint(directory, tokens, reference=None, source=None, kind=Non
         "train_action_projections": False,
         "use_peft": False,
     }
+    if config.get("train_action_expert", False) != train_action_expert:
+        raise ValueError(f"Expected train_action_expert={train_action_expert} in {directory}")
     for name, value in expected.items():
         if config.get(name) != value:
             raise ValueError(f"Expected {name}={value} in {directory}")
@@ -193,6 +197,16 @@ def validate_checkpoint(directory, tokens, reference=None, source=None, kind=Non
         ):
             if key not in keys or weights.get_slice(key).get_shape() != shape:
                 raise ValueError(f"Prompt tensor mismatch: {key}, expected {shape}")
+        if train_action_expert:
+            for prefix in (
+                "model.paligemma_with_expert.gemma_expert.model.",
+                "model.action_in_proj.",
+                "model.action_out_proj.",
+                "model.time_mlp_in.",
+                "model.time_mlp_out.",
+            ):
+                if not any(key.startswith(prefix) for key in keys):
+                    raise ValueError(f"Missing trained action network weights: {prefix}")
     validate_processors(directory, config)
     if source:
         training = read_json(directory / "train_config.json")
@@ -202,6 +216,8 @@ def validate_checkpoint(directory, tokens, reference=None, source=None, kind=Non
             assert_same_processors(source, directory)
     if reference:
         ref_config = read_json(Path(reference) / "config.json")
+        ref_config.setdefault("train_action_expert", False)
+        config.setdefault("train_action_expert", False)
         for name in set(config) | set(ref_config):
             if name not in {
                 "pretrained_path",
@@ -271,19 +287,33 @@ def main():
     parser.add_argument("--baseline-output", type=Path)
     parser.add_argument("--tokens", type=int, default=1)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--train-action-expert", action="store_true")
     args = parser.parse_args()
     try:
         if args.tokens < 1:
             raise ValueError("VLM token count must be positive")
+        if args.train_action_expert and (args.baseline_output or not args.checkpoint):
+            raise ValueError("Action expert mode requires a trained checkpoint, without baseline generation")
         validate_source(args.source, args.kind, args.dataset_root)
         if args.initial:
-            validate_checkpoint(args.initial, args.tokens, source=args.source, kind=args.kind)
+            validate_checkpoint(
+                args.initial,
+                args.tokens,
+                source=args.source,
+                kind=args.kind,
+                train_action_expert=args.train_action_expert,
+            )
         if args.checkpoint:
             # Final-only runs have no initialized model on disk. Still validate
             # source provenance, prompt shapes/recipe and all saved processors;
             # v044 must preserve its source's normalization exactly after loading.
             validate_checkpoint(
-                args.checkpoint, args.tokens, reference=args.initial, source=args.source, kind=args.kind
+                args.checkpoint,
+                args.tokens,
+                reference=args.initial,
+                source=args.source,
+                kind=args.kind,
+                train_action_expert=args.train_action_expert,
             )
         if args.baseline_output:
             if not args.initial:
@@ -293,7 +323,10 @@ def main():
             )
     except (OSError, ValueError, KeyError) as error:
         parser.exit(1, f"VLM-only preflight failed: {error}\n")
-    print(f"VLM-only preflight OK: source={args.kind} VLM={args.tokens} action=0")
+    print(
+        f"VLM adaptation preflight OK: source={args.kind} VLM={args.tokens} action_prompts=0 "
+        f"train_action_expert={args.train_action_expert}"
+    )
 
 
 if __name__ == "__main__":

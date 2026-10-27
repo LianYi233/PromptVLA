@@ -85,11 +85,12 @@ def make_monitor(policy, tmp_path):
     )
 
 
-def make_policy(dtype="float32"):
+def make_policy(dtype="float32", full_expert=False):
     return PI05Policy(
         _config(
             dtype=dtype,
-            vlm_prompt_only=True,
+            vlm_prompt_only=not full_expert,
+            train_action_expert=full_expert,
             num_prompt_tokens=0,
             cabo_enabled=False,
             next_action_pretrain_steps=0,
@@ -138,8 +139,9 @@ def test_nested_cli_configuration_and_invalid_probe_settings():
 
 
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
-def test_measurement_preserves_training_state_rng_gradients_and_optimizer_step(tmp_path, dtype):
-    policy = make_policy(dtype).train()
+@pytest.mark.parametrize("full_expert", [False, True])
+def test_measurement_preserves_training_state_rng_gradients_and_optimizer_step(tmp_path, dtype, full_expert):
+    policy = make_policy(dtype, full_expert).train()
     prompt = policy.model.vlm_prompt_tokens.weight
     prompt.grad = torch.full_like(prompt, 0.123)
     before = {name: value.clone() for name, value in policy.state_dict().items()}
@@ -361,7 +363,7 @@ def test_sharded_probe_order_matches_single_process_with_uneven_last_shard(tmp_p
         np.testing.assert_array_equal(actual["gram"], expected["gram"])
 
 
-def _ddp_worker(rank, root):
+def _ddp_worker(rank, root, full_expert):
     from accelerate import Accelerator
     from accelerate.utils import DistributedDataParallelKwargs
 
@@ -380,11 +382,11 @@ def _ddp_worker(rank, root):
         # Construct the same tiny real model inside each spawned process.
         patch = pytest.MonkeyPatch()
         _tiny_real_pi05.__wrapped__(patch)
-        policy = make_policy().train()
+        policy = make_policy(full_expert=full_expert).train()
         accelerator = Accelerator(
             cpu=True, kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=True)]
         )
-        optimizer = torch.optim.SGD([policy.model.vlm_prompt_tokens.weight], lr=0.001)
+        optimizer = torch.optim.SGD(policy.get_optim_params(), lr=0.001)
         wrapped, optimizer = accelerator.prepare(policy, optimizer)
         bare = accelerator.unwrap_model(wrapped)
         original = bare.model.vlm_prompt_tokens.weight
@@ -401,9 +403,13 @@ def _ddp_worker(rank, root):
             accelerator.backward(loss)
             optimizer.step()
             if step == 1:
-                previous_grad = original.grad.clone()
+                previous_grads = {
+                    name: p.grad.clone() for name, p in bare.named_parameters() if p.grad is not None
+                }
                 monitor.measure(bare, step, accelerator)
-                torch.testing.assert_close(original.grad, previous_grad, atol=0, rtol=0)
+                for name, p in bare.named_parameters():
+                    if name in previous_grads:
+                        torch.testing.assert_close(p.grad, previous_grads[name], atol=0, rtol=0)
         assert bare.model.vlm_prompt_tokens.weight is original
         # One-rank Python failures must be reported on both ranks before gather, without deadlock.
         if rank == 1:
@@ -423,18 +429,19 @@ def _ddp_worker(rank, root):
         torch.distributed.destroy_process_group()
 
 
-def test_two_rank_probes_match_single_rank_and_training_continues(tmp_path):
+@pytest.mark.parametrize("full_expert", [False, True])
+def test_two_rank_probes_match_single_rank_and_training_continues(tmp_path, full_expert):
     try:
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
     except PermissionError:
         pytest.skip("This environment forbids local TCP sockets required by Gloo DDP")
-    policy = make_policy().train()
+    policy = make_policy(full_expert=full_expert).train()
     monitor = make_monitor(policy, tmp_path / "single")
     monitor.save_protocol(0)
     monitor.measure(policy, 0, LocalAccelerator())
     try:
-        torch.multiprocessing.spawn(_ddp_worker, args=(str(tmp_path),), nprocs=2, join=True)
+        torch.multiprocessing.spawn(_ddp_worker, args=(str(tmp_path), full_expert), nprocs=2, join=True)
     except ProcessRaisedException as exc:
         if "Operation not permitted" in str(exc) and "ProcessGroupGloo" in str(exc):
             pytest.skip("This environment blocks Gloo TCP device initialization")

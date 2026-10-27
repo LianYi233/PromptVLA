@@ -64,12 +64,17 @@ class PI05Config(PreTrainedConfig):
     # This changes the prompt-only parameter budget and requires CABO/PEFT to be disabled.
     # It adds no checkpoint tensors and never unfreezes the VLM or action transformer.
     train_action_projections: bool = False
+    # Full velocity network: Gemma action transformer + action maps + time MLPs.
+    # The vision/language backbone and unused vocabulary head stay frozen.
+    # Separate from the legacy projection-only experiment; opt-in, ordinary flow only.
+    train_action_expert: bool = False
 
     n_obs_steps: int = 1
     chunk_size: int = 50  # Number of action steps to predict, in openpi called "action_horizon"
     n_action_steps: int = 50  # Number of action steps to execute
 
-    # Training stage. Both stages freeze the VLM and action path. ``next_action`` is kept as the public name for
+    # Training stage. The default freezes both backbones; full expert adaptation is flow-only.
+    # ``next_action`` is kept as the public name for
     # backwards compatibility; its base objective is action-only flow inpainting over the chunk.
     # The integrated trainer may route its final bridge updates through the standard
     # observation-conditioned objective without changing this stage or its optimizer. Action-only
@@ -140,7 +145,7 @@ class PI05Config(PreTrainedConfig):
     device: str | None = None  # Device to use for the model (None = auto-detect)
 
     # Legacy finetuning flags retained for checkpoint/CLI compatibility. Both backbones remain
-    # frozen; train_action_projections is the explicit opt-in for the two action linear maps.
+    # frozen by default; train_action_projections / train_action_expert explicitly opt in.
     freeze_vision_encoder: bool = True
     train_expert_only: bool = True
 
@@ -187,9 +192,24 @@ class PI05Config(PreTrainedConfig):
     def __post_init__(self):
         super().__post_init__()
 
-        # Older configs explicitly stored False. Loading them must never unfreeze either backbone.
+        # Legacy flags cannot unfreeze a backbone; action adaptation has explicit opt-ins above.
         self.freeze_vision_encoder = True
         self.train_expert_only = True
+        if self.train_action_expert and (
+            self.vlm_prompt_only
+            or self.train_action_projections
+            or self.cabo_enabled
+            or self.use_peft
+            or self.num_vlm_prompt_tokens < 1
+            or self.num_prompt_tokens != 0
+            or self.training_stage != PI05TrainingStage.FLOW
+            or self.next_action_pretrain_steps != 0
+            or self.next_action_bridge_steps != 0
+        ):
+            raise ValueError(
+                "train_action_expert requires VLM prompts, zero action prompts, ordinary flow, "
+                "vlm_prompt_only=False, train_action_projections=False, and no CABO/PEFT/priming/bridge"
+            )
         if self.train_action_projections and (self.cabo_enabled or self.use_peft):
             raise ValueError(
                 "train_action_projections requires cabo_enabled=False and use_peft=False. "

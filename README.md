@@ -28,6 +28,7 @@ FrameSkip 风格课程实验：见 [评分、双卡训练与评估说明](exampl
 预训练来源对照：见 [重复 W0-Bocc，并比较 pi05_libero_base 与 pi05_base](examples/analysis/README_pi05_source_compare.md)。固定同一份 P1 prompt、D0/W0 样本及 E1/T1 噪声，只替换原始权重；两组共享 LIBERO 配置与处理器，四卡并行训练两个模型。
 
 从难到易的顺序实验：见 [固定 LIBERO 起点与原样本/噪声配对，仅按旧评分降序训练](examples/analysis/README_pi05_hard_to_easy.md)。以本轮 source-libero 为对照，复用评分缓存，在各 task 内调整原 W0 样本使用顺序；单组双卡、VLM2、P1/D0/E1/T1、3000步，无重采样或loss加权。
+设置 `TRAIN_ACTION_EXPERT=true` 可在同一入口训练 VLM prompt 和完整动作生成网络（动作 Transformer、动作投影、时间 MLP）；视觉/VLM主干仍冻结，模型名增加 `aexpert`，评估时使用相同开关。默认false保留原prompt-only实验。
 
 ## Project and implementation
 

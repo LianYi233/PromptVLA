@@ -198,7 +198,8 @@ def test_prepare_and_check_exact_plan_reuse_and_detect_resigned_wrong_order(prep
         experiment.check(args["output"])
 
 
-def test_training_command_only_changes_order_and_output_labels(prepared_inputs, tmp_path):
+@pytest.mark.parametrize("full_expert", [False, True])
+def test_training_command_only_changes_order_and_declared_scope(prepared_inputs, tmp_path, full_expert):
     args = prepared_inputs
     tokenizer = tmp_path / "tokenizer"
     tokenizer.mkdir()
@@ -216,10 +217,13 @@ def test_training_command_only_changes_order_and_output_labels(prepared_inputs, 
         "DRY_RUN": "true",
     }
     parsed = []
-    for command in (
-        ["bash", str(ROOT / "examples/training/train_pi05_source_compare.sh"), "libero"],
-        ["bash", str(TRAIN)],
+    for index, command in enumerate(
+        (
+            ["bash", str(ROOT / "examples/training/train_pi05_source_compare.sh"), "libero"],
+            ["bash", str(TRAIN)],
+        )
     ):
+        env["TRAIN_ACTION_EXPERT"] = str(full_expert and index == 1).lower()
         result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=120)
         assert result.returncode == 0, result.stdout + result.stderr
         line = next(
@@ -232,12 +236,19 @@ def test_training_command_only_changes_order_and_output_labels(prepared_inputs, 
     differences = {
         key for key in parsed[0].keys() | parsed[1].keys() if parsed[0].get(key) != parsed[1].get(key)
     }
-    assert differences == {"main_process_port", "pdet.order_plan", "output_dir", "job_name"}
+    expected = {"main_process_port", "pdet.order_plan", "output_dir", "job_name"}
+    if full_expert:
+        expected |= {"policy.vlm_prompt_only", "policy.train_action_expert"}
+        assert parsed[1]["policy.train_action_expert"] == "true"
+        assert parsed[1]["policy.vlm_prompt_only"] == "false"
+    assert differences == expected
     assert parsed[1]["pdet.order_plan"] == str(args["output"] / "H2E.npz")
     assert parsed[1]["policy.path"] == str(args["pair"] / "libero")
     assert parsed[1]["vlm_prompt_init_path"] == str(args["pair"] / "P1.safetensors")
     assert not (tmp_path / "runs").exists()
-    (tmp_path / "runs" / RUN_NAME).mkdir(parents=True)
+    name = RUN_NAME.replace("hard2easy-r", "hard2easy-aexpert-r") if full_expert else RUN_NAME
+    assert Path(parsed[1]["output_dir"]).name == name
+    (tmp_path / "runs" / name).mkdir(parents=True)
     result = subprocess.run(["bash", str(TRAIN)], env=env, capture_output=True, text=True)
     assert result.returncode != 0 and "Output already exists" in result.stderr
 
@@ -264,7 +275,8 @@ def test_checkpoint_rejects_wrong_binding_or_keyframe_loss(prepared_inputs, tmp_
         experiment.check_checkpoint(args["output"], run)
 
 
-def test_audit_compares_actual_all_step_per_occurrence_bank(tmp_path, monkeypatch):
+@pytest.mark.parametrize("full_expert", [False, True])
+def test_audit_compares_actual_all_step_per_occurrence_bank(tmp_path, monkeypatch, full_expert):
     base, scores, manifest = small_inputs()
     changed = experiment.reorder(base, scores, manifest)
     data = tmp_path / "data"
@@ -273,7 +285,8 @@ def test_audit_compares_actual_all_step_per_occurrence_bank(tmp_path, monkeypatc
         "lerobot.utils.pdet_order.read_frame_metadata", lambda _: {k: scores[k] for k in META_COLUMNS}
     )
     policy = TinyPolicy()
-    runs = [tmp_path / REF_NAME, tmp_path / RUN_NAME]
+    name = RUN_NAME.replace("hard2easy-r", "hard2easy-aexpert-r") if full_expert else RUN_NAME
+    runs = [tmp_path / REF_NAME, tmp_path / name]
     for run, plan in zip(runs, (base, changed), strict=True):
         plan_path = tmp_path / f"{run.name}.npz"
         save_plan(plan_path, plan)
@@ -291,6 +304,12 @@ def test_audit_compares_actual_all_step_per_occurrence_bank(tmp_path, monkeypatc
             ),
         )
         cfg.steps, cfg.batch_size, cfg.dataset.root = 20, 2, data
+        expert = full_expert and run == runs[1]
+        cfg.to_dict = lambda expert=expert: {
+            "seed": 0,
+            "steps": 20,
+            "policy": {"vlm_prompt_only": not expert, "train_action_expert": expert},
+        }
         for rank in (0, 1):
             streams = PDETStreams(cfg, policy, accelerator(rank))
             for step in range(20):
@@ -302,7 +321,9 @@ def test_audit_compares_actual_all_step_per_occurrence_bank(tmp_path, monkeypatc
     monkeypatch.setattr(experiment, "check", lambda _: {"reference_run": str(runs[0])})
     monkeypatch.setattr(experiment, "check_checkpoint", lambda *_: None)
     monkeypatch.setattr(experiment, "assert_same_processors", lambda *_: None)
-    assert experiment.audit(tmp_path, runs[1])["audit"] == "inputs_and_recipe_passed"
+    report = experiment.audit(tmp_path, runs[1])
+    assert report["audit"] == "inputs_and_recipe_passed"
+    assert ("full_action_expert_training" in report["interventions"]) == full_expert
     for rank in (0, 1):
         path = runs[1] / f"pdet/manifest-rank{rank}.json"
         record = sources.read_json(path)
@@ -317,7 +338,8 @@ def test_audit_compares_actual_all_step_per_occurrence_bank(tmp_path, monkeypatc
         experiment.audit(tmp_path, runs[1])
 
 
-def test_evaluator_selects_correct_source_name_and_progress(tmp_path):
+@pytest.mark.parametrize("full_expert", [False, True])
+def test_evaluator_selects_correct_source_name_and_progress(tmp_path, full_expert):
     repo, binaries = tmp_path / "repo", tmp_path / "bin"
     repo.mkdir()
     binaries.mkdir()
@@ -333,11 +355,72 @@ def test_evaluator_selects_correct_source_name_and_progress(tmp_path):
         env={
             "PATH": str(binaries) + os.pathsep + os.environ["PATH"],
             "SOURCE_PAIR_DIR": str(tmp_path / "pair"),
+            "TRAIN_ACTION_EXPERT": str(full_expert).lower(),
         },
         capture_output=True,
         text=True,
     )
     assert result.returncode == 0, result.stderr
+    tag = "aexpert-" if full_expert else ""
     assert (
-        result.stdout.strip() == f"{tmp_path}/pair/libero|pi05-hard2easy-r1-libero-Bocc|1011|1000|10|true|all"
+        result.stdout.strip()
+        == f"{tmp_path}/pair/libero|pi05-hard2easy-{tag}r1-libero-Bocc|1011|1000|10|true|all"
     )
+
+
+def test_expert_checkpoint_requires_matching_name_config_and_complete_action_weights(
+    prepared_inputs, tmp_path
+):
+    from safetensors.numpy import load_file
+
+    args = prepared_inputs
+    experiment.prepare(**args)
+    run = tmp_path / RUN_NAME.replace("hard2easy-r", "hard2easy-aexpert-r")
+    checkpoint = run / "checkpoints/003000/pretrained_model"
+    shutil.copytree(args["reference"] / "checkpoints/003000/pretrained_model", checkpoint)
+    path = checkpoint / "train_config.json"
+    config = sources.read_json(path)
+    config["pdet"].update(enabled=True, order_plan=str(args["output"] / "H2E.npz"))
+    path.write_text(json.dumps(config))
+    with pytest.raises(ValueError, match="training scope"):
+        experiment.check_checkpoint(args["output"], run)
+    config["policy"].update(vlm_prompt_only=False, train_action_expert=True)
+    path.write_text(json.dumps(config))
+    (checkpoint / "config.json").write_text(json.dumps(config["policy"]))
+    with pytest.raises(ValueError, match="Missing trained action network"):
+        experiment.check_checkpoint(args["output"], run)
+    weights = load_file(checkpoint / "model.safetensors")
+    for prefix in (
+        "paligemma_with_expert.gemma_expert.model",
+        "action_in_proj",
+        "action_out_proj",
+        "time_mlp_in",
+        "time_mlp_out",
+    ):
+        weights[f"model.{prefix}.weight"] = np.ones((2, 2), dtype=np.float32)
+    save_file(weights, checkpoint / "model.safetensors")
+    assert experiment.check_checkpoint(args["output"], run)["train_action_expert"]
+    (run / "checkpoints/last").symlink_to("003000")
+    tokenizer = tmp_path / "tokenizer"
+    tokenizer.mkdir()
+    result = subprocess.run(
+        ["bash", str(EVAL), "all"],
+        env={
+            "PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"],
+            "HOME": os.environ["HOME"],
+            "SOURCE_PAIR_DIR": str(args["pair"]),
+            "ORDER_DIR": str(args["output"]),
+            "CKPT_ROOT": str(tmp_path),
+            "TOKENIZER_PATH": str(tokenizer),
+            "TRAIN_ACTION_EXPERT": "true",
+            "DRY_RUN": "true",
+        },
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "train_action_expert=True" in result.stdout
+    assert f"--policy.path={checkpoint}" in result.stdout
+    assert "--policy.train_action_expert=false" not in result.stdout
+    assert "--policy.vlm_prompt_only=true" not in result.stdout

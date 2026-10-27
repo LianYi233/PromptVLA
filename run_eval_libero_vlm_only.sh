@@ -20,6 +20,15 @@ EOF
 fi
 if (( $# > 4 )); then echo "Too many arguments; see --help" >&2; exit 2; fi
 SELECT="${1:-both}"; CONDITION="${2:-all}"; SUITES="${3:-all}"; SEED="${4:-0}"
+TRAIN_ACTION_EXPERT="${TRAIN_ACTION_EXPERT:-false}"
+case "$TRAIN_ACTION_EXPERT" in
+  false) ;;
+  true)
+    [[ "$CONDITION" == trained && -n "${RUN_NAME:-}" ]] || {
+      echo 'Action-expert evaluation requires trained and an explicit RUN_NAME' >&2; exit 2;
+    } ;;
+  *) echo 'Invalid TRAIN_ACTION_EXPERT' >&2; exit 2 ;;
+esac
 case "$SELECT" in both) SOURCES=(base finetuned) ;; base|finetuned) SOURCES=("$SELECT") ;; *) echo "Invalid source" >&2; exit 2 ;; esac
 case "$CONDITION" in all) CONDITIONS=(baseline initial trained) ;; baseline|initial|trained) CONDITIONS=("$CONDITION") ;; *) echo "Invalid condition" >&2; exit 2 ;; esac
 case "$SUITES" in all|no10|libero_spatial|libero_object|libero_goal|libero_10) ;; *) echo "Invalid suite" >&2; exit 2 ;; esac
@@ -60,6 +69,7 @@ select_source() {
 for kind in "${SOURCES[@]}"; do
   select_source "$kind"
   CHECK_ARGS=("$SOURCE_PATH" --kind "$KIND" --tokens "$TOKENS")
+  if [[ "$TRAIN_ACTION_EXPERT" == true ]]; then CHECK_ARGS+=(--train-action-expert); fi
   if [[ -e "$INITIAL" || -L "$INITIAL" ]]; then
     CHECK_ARGS+=(--initial "$INITIAL")
   elif [[ "$CONDITION" != trained ]]; then
