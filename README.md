@@ -34,6 +34,8 @@ FrameSkip 风格课程实验：见 [评分、双卡训练与评估说明](exampl
 
 两样本顺序对照：见 [同一对简单/困难观测，交换两个3000步阶段](examples/analysis/README_pi05_two_frame.md)。复用评分缓存，选同 task/episode 的两个完整、不重叠动作窗口；E2H/H2E 各训练6000步、曝光各半，固定帧与噪声配对，仅训练VLM2+完整action expert。四卡并行两组，记录两个训练样本各自的固定损失，只保存最终006000。
 
+LIBERO-PRO / PLUS 泛化评估：见 [完整动作网络checkpoint的独立基准入口](examples/analysis/README_libero_robustness.md)。`run_eval_libero_robustness.sh` 校验并选择指定fork，加载保存的VLM2+action expert及处理器，支持任务级恢复、单行进度、按扰动类别汇总；PLUS严格检查10030个变体，PRO可明确选择已备齐资源的维度，不把部分评测标成全量。
+
 ## Project and implementation
 
 This independent repository continues the `vlm-only` work from
