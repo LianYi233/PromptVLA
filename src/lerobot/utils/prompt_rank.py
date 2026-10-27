@@ -182,7 +182,7 @@ class PromptRankMonitor:
             raise ValueError("Non-finite cached noise")
         return result
 
-    def __init__(self, dataset, preprocessor, config, options, output_dir, device):
+    def __init__(self, dataset, preprocessor, config, options, output_dir, device, *, indices=None):
         from lerobot.utils.collate import lerobot_collate_fn
 
         options.validate()
@@ -191,10 +191,25 @@ class PromptRankMonitor:
         count = min(options.samples, len(dataset))
         if count == 0:
             raise ValueError("Cannot build a prompt-rank probe from an empty dataset")
-        # One reproducible random frame per dataset stratum; not a claim of task balancing.
-        rng = np.random.default_rng(options.seed)
-        edges = np.linspace(0, len(dataset), count + 1, dtype=int)
-        indices = [int(rng.integers(left, right)) for left, right in zip(edges[:-1], edges[1:], strict=True)]
+        explicit_indices = indices is not None
+        if explicit_indices:
+            indices = list(indices)
+            if (
+                len(indices) != options.samples
+                or len(set(indices)) != len(indices)
+                or any(type(index) is not int or not 0 <= index < len(dataset) for index in indices)
+            ):
+                raise ValueError(
+                    "Explicit probe indices must be unique valid dataset indices matching samples"
+                )
+            count = len(indices)
+        else:
+            # One reproducible random frame per dataset stratum; not a claim of task balancing.
+            rng = np.random.default_rng(options.seed)
+            edges = np.linspace(0, len(dataset), count + 1, dtype=int)
+            indices = [
+                int(rng.integers(left, right)) for left, right in zip(edges[:-1], edges[1:], strict=True)
+            ]
         original_transforms = dataset.image_transforms
         self.samples, identities = [], []
         with evaluation_rng(device, options.seed):
@@ -253,6 +268,8 @@ class PromptRankMonitor:
             "projected_rows": count * len(options.timesteps) * options.output_probes,
             "scope": "fixed training observations, teacher-interpolated noisy actions; not rollout Jacobian",
         }
+        if explicit_indices:
+            self.manifest["fixed_dataset_indices"] = indices
 
     def save_protocol(self, start_step):
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -432,6 +449,12 @@ class PromptRankMonitor:
                 metrics[f"fixed_training_probe_flow_mse_t{timestep:g}"] = sum(
                     item["squared_error_sum"] for item in subset
                 ) / sum(item["valid_coordinates"] for item in subset)
+            if "fixed_dataset_indices" in self.manifest:
+                for sample_index in range(len(self.samples)):
+                    subset = [item for item in loss_records if item["sample_index"] == sample_index]
+                    metrics[f"fixed_training_probe_sample{sample_index}_mse"] = sum(
+                        item["squared_error_sum"] for item in subset
+                    ) / sum(item["valid_coordinates"] for item in subset)
         metrics["probe_seconds"] = elapsed
         metrics["erank_fraction_of_ceiling"] = metrics["jacobian_erank"] / metrics["rank_ceiling"]
         record = {"step": int(step), **metrics}

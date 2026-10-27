@@ -157,6 +157,23 @@ def validate_plan_dataset(plan, metadata, *, steps, batch_size, world_size):
             raise ValueError(f"Plan {key} does not match the source dataset")
 
 
+def fixed_probe_indices(plan):
+    """Opt-in two-frame probes only; legacy finite plans keep the original probe selection."""
+    if plan is None or "two_frame" not in plan["manifest"]:
+        return None
+    info = plan["manifest"]["two_frame"]
+    indices = info.get("probe_indices", [])
+    if (
+        info.get("protocol") != "pi05-two-frame-order-v1"
+        or len(indices) != 2
+        or any(type(index) is not int for index in indices)
+        or len(set(indices)) != 2
+        or sorted(indices) != np.unique(plan["index"]).tolist()
+    ):
+        raise ValueError("Two-frame probes must match the plan's exact two training frames")
+    return indices
+
+
 class PlannedDataset(torch.utils.data.Dataset):
     def __init__(self, dataset):
         self.dataset = dataset

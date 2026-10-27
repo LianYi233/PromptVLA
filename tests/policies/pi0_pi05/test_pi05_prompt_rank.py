@@ -199,6 +199,48 @@ def test_probe_failure_restores_parameter_identity_and_flags(tmp_path, monkeypat
     torch.testing.assert_close(torch.get_rng_state(), state)
 
 
+def test_explicit_two_frame_probes_replay_and_preserve_training_rng(tmp_path):
+    policy = make_policy(full_expert=True).train()
+    state = torch.get_rng_state().clone()
+    monitor = PromptRankMonitor(
+        ProbeDataset(),
+        identity,
+        policy.config,
+        PromptRankConfig(freq=250, samples=2, output_probes=2, timesteps=[0.2, 0.8], fixed_flow_loss=True),
+        tmp_path,
+        "cpu",
+        indices=[3, 1],
+    )
+    monitor.save_protocol(0)
+    assert monitor.manifest["fixed_dataset_indices"] == [3, 1]
+    assert [sample["dataset_index"] for sample in monitor.manifest["samples"]] == [3, 1]
+    first = monitor.measure(policy, 0, LocalAccelerator())
+    replay = PromptRankMonitor.from_cache(monitor.output_dir, "cpu")
+    assert replay.manifest["fixed_dataset_indices"] == [3, 1]
+    second = replay.measure(policy, 1, LocalAccelerator())
+    torch.testing.assert_close(torch.get_rng_state(), state, rtol=0, atol=0)
+    records = [
+        json.loads(line)
+        for line in (monitor.output_dir / "fixed_training_probe_loss.jsonl").read_text().splitlines()
+    ]
+    for i in (0, 1):
+        rows = [sample for sample in records[0]["samples"] if sample["sample_index"] == i]
+        expected = sum(row["squared_error_sum"] for row in rows) / sum(
+            row["valid_coordinates"] for row in rows
+        )
+        assert expected > 0
+        assert first[f"fixed_training_probe_sample{i}_mse"] == expected
+        assert second[f"fixed_training_probe_sample{i}_mse"] == expected
+
+
+@pytest.mark.parametrize("indices", [[1, 1], [-1, 1], [1, 5], [1], [True, 1]])
+def test_explicit_probe_indices_reject_invalid_pair(tmp_path, indices):
+    with pytest.raises(ValueError, match="Explicit probe indices"):
+        PromptRankMonitor(
+            ProbeDataset(), identity, _config(), PromptRankConfig(samples=2), tmp_path, "cpu", indices=indices
+        )
+
+
 def test_same_probe_across_token_counts_and_no_mutation_of_model_output(tmp_path):
     policy = make_policy()
     monitor = make_monitor(policy, tmp_path / "first")

@@ -1118,12 +1118,19 @@ def _train_single_stage(
 
     prompt_rank_monitor = None
     if cfg.prompt_rank.freq > 0:
+        from lerobot.utils.pdet_order import fixed_probe_indices
         from lerobot.utils.prompt_rank import PromptRankMonitor, collective_call
 
         prompt_rank_monitor = collective_call(
             accelerator,
             lambda: PromptRankMonitor(
-                dataset, preprocessor, active_cfg, cfg.prompt_rank, cfg.output_dir, device
+                dataset,
+                preprocessor,
+                active_cfg,
+                cfg.prompt_rank,
+                cfg.output_dir,
+                device,
+                indices=fixed_probe_indices(pdet_streams.plan if pdet_streams is not None else None),
             ),
         )
         if keyframe_runtime is not None:

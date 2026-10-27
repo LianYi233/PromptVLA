@@ -32,6 +32,8 @@ FrameSkip 风格课程实验：见 [评分、双卡训练与评估说明](exampl
 
 可调曝光比例的双向课程：见 [易→难多学简单样本 / 难→易多学困难样本](examples/analysis/README_pi05_ratio_curriculum.md)。新入口 `train_pi05_ratio_curriculum.sh` 固定训练VLM2+完整action expert，用 `CURRICULUM_DIRECTION` 控制顺序、`EASY_PERCENT` 控制简单样本使用占比（默认70%/30%），双卡×batch32，`FLOW_STEPS=6000`默认只存最终006000。四卡可并行两组；整个预算只进行一次课程，不在中途重启。重采样会改变样本与噪声的配对，记录为独立干预；设置3000步仍兼容旧计划/名称。
 
+两样本顺序对照：见 [同一对简单/困难观测，交换两个3000步阶段](examples/analysis/README_pi05_two_frame.md)。复用评分缓存，选同 task/episode 的两个完整、不重叠动作窗口；E2H/H2E 各训练6000步、曝光各半，固定帧与噪声配对，仅训练VLM2+完整action expert。四卡并行两组，记录两个训练样本各自的固定损失，只保存最终006000。
+
 ## Project and implementation
 
 This independent repository continues the `vlm-only` work from
