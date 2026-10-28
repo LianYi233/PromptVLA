@@ -807,7 +807,9 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         frozen. Autograd remains enabled through both backbones to reach the input prompts.
         """
         trainable_ids = set()
-        trainable_modules = [self.vlm_prompt_tokens, self.prompt_tokens]
+        trainable_modules = [self.prompt_tokens]
+        if not getattr(self.config, "freeze_vlm_prompt", False):
+            trainable_modules.append(self.vlm_prompt_tokens)
         full_expert = getattr(self.config, "train_action_expert", False)
         if getattr(self.config, "train_action_projections", False) or full_expert:
             trainable_modules.extend([self.action_in_proj, self.action_out_proj])

@@ -20,16 +20,18 @@ from lerobot.utils.frameskip_curriculum import load_scores
 from lerobot.utils.pdet_order import META_COLUMNS, arrays_hash, load_plan, save_plan
 
 PROTOCOL = "pi05-ratio-curriculum-v1"
-DIRECTIONS = {"easy_to_hard": "E2H", "hard_to_easy": "H2E"}
+DIRECTIONS = {"easy_to_hard": "E2H", "hard_to_easy": "H2E", "random": "RND"}
+SCOPES = {"joint": "aexpert", "expert_only": "frozenp-aexpert", "prompt_only": "promptonly"}
 NAME = re.compile(
-    r"pi05-curriculum-(E2H|H2E)-e([0-9]+)-h([0-9]+)-S([0-9]+)(-steps[1-9][0-9]*)?-aexpert-r([1-9][0-9]*)"
+    r"pi05-curriculum-(E2H|H2E|RND)-e([0-9]+)-h([0-9]+)-S([0-9]+)(-steps[1-9][0-9]*)?"
+    r"-(aexpert|frozenp-aexpert|promptonly)-r([1-9][0-9]*)"
     r"-libero-Bocc-base-vlm2-P1-D0-E1-T1"
 )
 
 
 def options(direction, easy_percent, sample_seed):
     if direction not in DIRECTIONS:
-        raise ValueError("direction must be easy_to_hard or hard_to_easy")
+        raise ValueError(f"direction must be one of {tuple(DIRECTIONS)}")
     if type(easy_percent) is not int or not 1 <= easy_percent <= 99:
         raise ValueError("easy_percent must be an integer in [1, 99]")
     if type(sample_seed) is not int or not 0 <= sample_seed < 2**32:
@@ -48,6 +50,33 @@ def label(direction, easy_percent, sample_seed, steps=3000):
     validate_steps(steps)
     suffix = "" if steps == 3000 else f"-steps{steps}"
     return f"{DIRECTIONS[direction]}-e{easy_percent}-h{100 - easy_percent}-S{sample_seed}{suffix}"
+
+
+def scope_flags(scope):
+    if scope not in SCOPES:
+        raise ValueError(f"Unknown training scope: {scope}")
+    return {
+        "train_action_expert": scope != "prompt_only",
+        "vlm_prompt_only": scope == "prompt_only",
+        "freeze_vlm_prompt": scope == "expert_only",
+    }
+
+
+def scope_from_run(run):
+    match = NAME.fullmatch(Path(run).name)
+    if match is None:
+        raise ValueError(f"Invalid ratio curriculum run name: {run}")
+    return next(scope for scope, tag in SCOPES.items() if tag == match[6])
+
+
+def run_name(direction, easy_percent, sample_seed=0, steps=6000, scope="joint", repeat=2):
+    scope_flags(scope)
+    if type(repeat) is not int or repeat < 1:
+        raise ValueError("repeat must be a positive integer")
+    return (
+        f"pi05-curriculum-{label(direction, easy_percent, sample_seed, steps)}"
+        f"-{SCOPES[scope]}-r{repeat}-libero-Bocc-base-vlm2-P1-D0-E1-T1"
+    )
 
 
 def partition(baseline, scores, score_manifest):
@@ -145,6 +174,12 @@ def make_plan(baseline, scores, score_manifest, *, direction, easy_percent, samp
     values = scores["score"][arrays["index"]]
     for task in tasks:
         slots = np.flatnonzero(arrays["task_index"] == task)
+        if direction == "random":
+            # Independent local generator: permute the SAME canonical occurrence
+            # pool, without changing task slots, frame counts or per-ID E/T.
+            rng = np.random.default_rng(np.random.SeedSequence([72820, sample_seed, int(task)]))
+            order[slots] = rng.permutation(slots)
+            continue
         # At a tied boundary, all easy-group uses precede hard-group uses in E2H,
         # and vice versa in H2E. Remaining ties use immutable new occurrence ID.
         group = (~easy[arrays["index"][slots]]).astype(np.int64)
@@ -297,7 +332,7 @@ def check_name(run, factors, tokens, within_seed):
         factors.get("flow_binding"),
     ) != (0, 2, 1, 0, 1, 1, "occurrence"):
         raise ValueError("Expected ratio-curriculum/aexpert/VLM2/P1/D0/E1/T1/occurrence name and config")
-    direction, easy, hard, seed, budget_tag, repeat = match.groups()
+    direction, easy, hard, seed, budget_tag, _scope, repeat = match.groups()
     info = load_plan(factors["order_plan"])["manifest"]
     settings = info["difficulty_sampling"]
     if f"{direction}-e{easy}-h{hard}-S{seed}{budget_tag or ''}" != label(
@@ -326,12 +361,30 @@ def check_checkpoint(directory, run):
         or (config.get("sample_weighting") is not None)
     ):
         raise ValueError("Ratio curriculum must not add loss weighting")
-    if not policy.get("train_action_expert", False) or policy.get("vlm_prompt_only") is not False:
-        raise ValueError("This experiment requires VLM prompt plus full action expert training")
+    scope = scope_from_run(run)
+    expected = scope_flags(scope)
+    saved_policy = sources.read_json(checkpoint / "config.json")
+    for key, value in expected.items():
+        if policy.get(key, False) != value or saved_policy.get(key, False) != value:
+            raise ValueError(f"Checkpoint training scope disagrees with {scope}: {key}")
     validate_checkpoint(
-        checkpoint, 2, source=Path(record["pair"]) / "libero", kind="base", train_action_expert=True
+        checkpoint,
+        2,
+        source=Path(record["pair"]) / "libero",
+        kind="base",
+        train_action_expert=expected["train_action_expert"],
     )
-    return {"checkpoint": "passed", "run": str(run), "steps": steps, **record["settings"]}
+    if expected["freeze_vlm_prompt"]:
+        from safetensors import safe_open
+
+        from lerobot.utils.prompt_initialization import read_initial_prompt
+
+        initial, _ = read_initial_prompt(Path(record["pair"]) / "P1.safetensors", 2)
+        with safe_open(checkpoint / "model.safetensors", framework="pt", device="cpu") as weights:
+            final = weights.get_tensor("model.vlm_prompt_tokens.weight").float().numpy()
+        if not np.array_equal(initial, final):
+            raise ValueError("Frozen P1 prompt changed during expert-only training")
+    return {"checkpoint": "passed", "run": str(run), "steps": steps, "scope": scope, **record["settings"]}
 
 
 def audit(directory, run):
@@ -346,9 +399,10 @@ def audit(directory, run):
     old, old_report = inspect_run(reference, name_checker=sources.check_name, bank_prefix_count=shared_count)
     new, new_report = inspect_run(run, name_checker=check_name, bank_prefix_count=shared_count)
     code, pools, tasks = {}, {}, {}
-    for name, invariant, expert, budget in (
-        ("reference", old, False, reference_steps),
-        ("curriculum", new, True, steps),
+    scope = scope_from_run(run)
+    for name, invariant, train_scope, budget in (
+        ("reference", old, "prompt_only", reference_steps),
+        ("curriculum", new, scope, steps),
     ):
         code[name] = {key: invariant.pop(key) for key in ("git_commit", "source_tree_sha256")}
         pools[name] = invariant.pop(
@@ -365,11 +419,11 @@ def audit(directory, run):
         if "save_freq" in invariant["recipe"] and invariant["recipe"].pop("save_freq") != budget:
             raise ValueError("Unexpected checkpoint save frequency")
         policy = invariant["recipe"]["policy"]
-        if policy.get("train_action_expert", False) != expert or policy.get("vlm_prompt_only") != (
-            not expert
-        ):
-            raise ValueError("Recorded recipe disagrees with trainable scope")
+        for key, value in scope_flags(train_scope).items():
+            if policy.get(key, False) != value:
+                raise ValueError(f"Recorded recipe disagrees with trainable scope: {key}")
         policy.pop("train_action_expert", None)
+        policy.pop("freeze_vlm_prompt", None)
         policy["vlm_prompt_only"] = True
     if old != new:
         changed = [key for key in old.keys() | new.keys() if old.get(key) != new.get(key)]
@@ -391,7 +445,7 @@ def audit(directory, run):
         "interventions": [
             "easy_hard_resampling",
             record["settings"]["direction"],
-            "full_action_expert_training",
+            f"training_scope:{scope}",
         ]
         + (["training_budget"] if steps != reference_steps else []),
         "sample_pools": pools,

@@ -68,6 +68,9 @@ class PI05Config(PreTrainedConfig):
     # The vision/language backbone and unused vocabulary head stay frozen.
     # Separate from the legacy projection-only experiment; opt-in, ordinary flow only.
     train_action_expert: bool = False
+    # Matched architecture control: keep the imported VLM prompt in the forward
+    # pass, but update only the full action network. Never a zero-token model.
+    freeze_vlm_prompt: bool = False
 
     n_obs_steps: int = 1
     chunk_size: int = 50  # Number of action steps to predict, in openpi called "action_horizon"
@@ -195,6 +198,8 @@ class PI05Config(PreTrainedConfig):
         # Legacy flags cannot unfreeze a backbone; action adaptation has explicit opt-ins above.
         self.freeze_vision_encoder = True
         self.train_expert_only = True
+        if self.freeze_vlm_prompt and not self.train_action_expert:
+            raise ValueError("freeze_vlm_prompt requires train_action_expert=True")
         if self.train_action_expert and (
             self.vlm_prompt_only
             or self.train_action_projections

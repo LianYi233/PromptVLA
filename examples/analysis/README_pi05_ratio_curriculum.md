@@ -1,10 +1,15 @@
 # 可调简单/困难占比的双向课程
 
-本实验训练 **2个VLM prompt token + 整个action expert**，起点仍为 `pi05_libero_base`。
+本实验默认训练 **2个VLM prompt token + 整个action expert**，起点仍为 `pi05_libero_base`。
 视觉编码器和VLM主干冻结。动作Transformer、动作输入/输出投影、时间MLP参与训练；action prompt=0。
 P1、全局seed0、E1/T1、Bocc、双卡×每卡batch32、原学习率/损失均保留。
 现在默认 `FLOW_STEPS=6000`，只保存最终完整006000；可显式调整训练步数。
 继承同样的rank/flow探针；rank仍指对prompt的Jacobian，不是整个动作网络的秩。
+
+新增四轮消融入口见 [自动运行8组课程/模块对照](README_pi05_curriculum_ablation.md)。
+单组入口现在也支持 `CURRICULUM_DIRECTION=random`（默认easy50%）、
+`TRAIN_SCOPE=joint|expert_only|prompt_only`（默认joint）；expert_only保留并冻结原P1。
+E2H/H2E的原默认参数和计划不变，下面的双向示例仍为joint。
 
 ## 旧版与新版的区别
 

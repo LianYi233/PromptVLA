@@ -59,10 +59,8 @@ def training_draws():
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.parametrize("full_expert", [False, True])
-def test_swap_preserves_rng_future_flow_draws_parameter_identity_and_frozen_weights(
-    tmp_path, dtype, full_expert
-):
+@pytest.mark.parametrize("scope", ["prompt_only", "joint", "expert_only"])
+def test_swap_preserves_rng_future_flow_draws_parameter_identity_and_frozen_weights(tmp_path, dtype, scope):
     original = np.random.default_rng(1).normal(0, 0.02, (2, 2048)).astype(np.float32)
     prompt = torch.from_numpy(original).to(dtype=dtype).float().numpy()
     path, prompt, _ = packet(tmp_path, prompt)
@@ -70,7 +68,7 @@ def test_swap_preserves_rng_future_flow_draws_parameter_identity_and_frozen_weig
     np.random.seed(0)
     torch.manual_seed(0)
     policy = Policy(dtype)
-    if full_expert:
+    if scope != "prompt_only":
         policy.config.vlm_prompt_only = False
         policy.config.train_action_expert = True
         policy.model.paligemma_with_expert = torch.nn.Module()
@@ -78,6 +76,8 @@ def test_swap_preserves_rng_future_flow_draws_parameter_identity_and_frozen_weig
         policy.model.paligemma_with_expert.gemma_expert.model = torch.nn.Linear(4, 4)
         for name in ("action_in_proj", "action_out_proj", "time_mlp_in", "time_mlp_out"):
             setattr(policy.model, name, torch.nn.Linear(4, 4))
+    policy.config.freeze_vlm_prompt = scope == "expert_only"
+    policy.model.vlm_prompt_tokens.weight.requires_grad_(scope != "expert_only")
     other_weights = {n: p.clone() for n, p in policy.named_parameters() if "vlm_prompt_tokens" not in n}
     parameter = policy.model.vlm_prompt_tokens.weight
     optimizer = torch.optim.AdamW([parameter], lr=1e-3)
@@ -101,6 +101,7 @@ def test_swap_preserves_rng_future_flow_draws_parameter_identity_and_frozen_weig
         assert torch.equal(actual[2], reference[2])
         assert torch.equal(actual[3], reference[3])
     assert policy.model.vlm_prompt_tokens.weight is parameter
+    assert parameter.requires_grad == (scope != "expert_only")
     assert optimizer.param_groups[0]["params"][0] is parameter
     np.testing.assert_array_equal(parameter.detach().float().numpy(), prompt)
     for name, value in policy.model.backbone.state_dict().items():

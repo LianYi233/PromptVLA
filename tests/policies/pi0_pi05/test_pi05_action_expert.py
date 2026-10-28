@@ -48,20 +48,24 @@ def test_reject_incompatible_expert_training(options):
 
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 @pytest.mark.parametrize("checkpointing", [False, True])
-def test_real_backward_updates_every_action_group_and_prompt_only(dtype, checkpointing, tmp_path):
-    cfg = config(dtype=dtype, gradient_checkpointing=checkpointing)
+@pytest.mark.parametrize("frozen_prompt", [False, True])
+def test_real_backward_updates_every_action_group_and_prompt_only(
+    dtype, checkpointing, frozen_prompt, tmp_path
+):
+    cfg = config(dtype=dtype, gradient_checkpointing=checkpointing, freeze_vlm_prompt=frozen_prompt)
     policy = PI05Policy(cfg)
     policy.requires_grad_(True)  # The partition must also repair accidental global unfreezing.
     policy.eval().train()
     optimizer = torch.optim.AdamW(policy.get_optim_params(), lr=0.01, weight_decay=0)
     prefixes = (
-        "model.vlm_prompt_tokens.",
         "model.paligemma_with_expert.gemma_expert.model.",
         "model.action_in_proj.",
         "model.action_out_proj.",
         "model.time_mlp_in.",
         "model.time_mlp_out.",
     )
+    if not frozen_prompt:
+        prefixes += ("model.vlm_prompt_tokens.",)
     before = {n: p.detach().clone() for n, p in policy.named_parameters()}
     selected = {n for n, p in policy.named_parameters() if p.requires_grad}
     assert selected == {n for n in before if n.startswith(prefixes)}
@@ -91,13 +95,15 @@ def test_real_backward_updates_every_action_group_and_prompt_only(dtype, checkpo
     cfg.save_pretrained(checkpoint)
     reloaded = PI05Policy.from_pretrained(checkpoint, strict=True)
     assert reloaded.config.train_action_expert and not reloaded.config.vlm_prompt_only
+    assert reloaded.config.freeze_vlm_prompt == frozen_prompt
     validate_vlm_trainables(reloaded)
     for name, p in reloaded.named_parameters():
         torch.testing.assert_close(p, dict(policy.named_parameters())[name], atol=0, rtol=0)
 
 
-def test_probe_exception_restores_all_expert_flags_gradients_and_parameter_objects():
-    policy = PI05Policy(config()).train()
+@pytest.mark.parametrize("frozen_prompt", [False, True])
+def test_probe_exception_restores_all_expert_flags_gradients_and_parameter_objects(frozen_prompt):
+    policy = PI05Policy(config(freeze_vlm_prompt=frozen_prompt)).train()
     before = list(policy.parameters())
     for p in before:
         if p.requires_grad:
@@ -117,7 +123,10 @@ def test_probe_exception_restores_all_expert_flags_gradients_and_parameter_objec
         pass
 
 
-def test_training_pipeline_accepts_imported_p_and_rank_probes_for_full_expert(tmp_path, monkeypatch):
+@pytest.mark.parametrize("frozen_prompt", [False, True])
+def test_training_pipeline_accepts_imported_p_and_rank_probes_for_full_expert(
+    tmp_path, monkeypatch, frozen_prompt
+):
     import draccus
     import numpy as np
 
@@ -150,7 +159,29 @@ def test_training_pipeline_accepts_imported_p_and_rank_probes_for_full_expert(tm
             f"--output_dir={tmp_path / 'new'}",
         ],
     )
-    cfg.policy = config(num_vlm_prompt_tokens=2, compile_model=False, push_to_hub=False)
+    cfg.policy = config(
+        num_vlm_prompt_tokens=2, compile_model=False, push_to_hub=False, freeze_vlm_prompt=frozen_prompt
+    )
     monkeypatch.setattr("sys.argv", ["lerobot-train"])
     cfg.validate()
     assert cfg.policy.train_action_expert
+
+
+def test_frozen_prompt_requires_trainable_expert():
+    with pytest.raises(ValueError, match="freeze_vlm_prompt"):
+        config(train_action_expert=False, freeze_vlm_prompt=True)
+
+
+def test_frozen_prompt_still_has_a_probe_jacobian_without_joining_optimizer():
+    policy = PI05Policy(config(freeze_vlm_prompt=True)).train()
+    original = policy.model.vlm_prompt_tokens.weight
+    optimizer = torch.optim.AdamW(policy.get_optim_params(), lr=0.001)
+    assert not original.requires_grad
+    assert all(original is not p for group in optimizer.param_groups for p in group["params"])
+    with isolated_prompt(policy) as probe:
+        loss = policy.model(**_inputs(), actions=_actions()).mean()
+        (gradient,) = torch.autograd.grad(loss, probe)
+        assert torch.isfinite(gradient).all() and gradient.abs().sum() > 0
+    assert policy.model.vlm_prompt_tokens.weight is original and not original.requires_grad
+    assert original.grad is None
+    validate_vlm_trainables(policy)

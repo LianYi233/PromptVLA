@@ -5,15 +5,17 @@ REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
   cat <<'EOF'
 Usage: bash examples/training/train_pi05_ratio_curriculum.sh [--wandb.*=...]
-Train 2 VLM prompt tokens + the FULL action expert, starting from pi05_libero_base.
-CURRICULUM_DIRECTION=easy_to_hard|hard_to_easy (default easy_to_hard).
+Start from pi05_libero_base with the same imported 2-token P1 prompt.
+TRAIN_SCOPE=joint|expert_only|prompt_only (default joint).
+expert_only keeps P1 in the forward pass but freezes it; prompt_only freezes the expert.
+CURRICULUM_DIRECTION=easy_to_hard|hard_to_easy|random (default easy_to_hard).
 EASY_PERCENT=1..99: total EASY exposure percent, NOT a per-batch mixture or loss weight.
 Default 70 for easy_to_hard, 30 for hard_to_easy. Hard percent = 100 - EASY_PERCENT.
 Each task's candidate frames are split into lower/upper score halves. Resample each
 group to its quota, then sort within fixed task slots. Repeat uses get fresh IDs/E/T.
 SAMPLE_SEED=0 controls group sampling only; P1/D0/E1/T1 remain fixed.
 FLOW_STEPS=6000 (default): one curriculum over the whole budget; final-only checkpoint006000.
-Fixed: TRAIN_ACTION_EXPERT=true, VLM2, global seed0, 2 GPUs x batch32,
+Fixed: VLM2, global seed0, 2 GPUs x batch32,
 bf16, no compile, no loss weighting. FLOW_STEPS=3000 retains legacy plan/run names.
 Defaults: GPU_IDS=0,1 MAIN_PROCESS_PORT=29584 REPEAT_ID=1 DRY_RUN=false.
 SOURCE_PAIR_DIR=/data1/wyn/prompt-work/source-pair-r1
@@ -38,10 +40,17 @@ export DATASET_ROOT="${DATASET_ROOT:-/home/wyn/datasets/libero}"
 export GPU_IDS="${GPU_IDS:-0,1}" MAIN_PROCESS_PORT="${MAIN_PROCESS_PORT:-29584}"
 export BATCH_SIZE=32 NUM_PROCESSES=2 FLOW_STEPS="${FLOW_STEPS:-6000}" SAVE_ONLY_FINAL=true DTYPE=bfloat16
 [[ "$FLOW_STEPS" =~ ^[1-9][0-9]*$ ]] || { echo 'Invalid FLOW_STEPS' >&2; exit 2; }
-if [[ "${TRAIN_ACTION_EXPERT:-true}" != true ]]; then
-  echo 'This recipe requires TRAIN_ACTION_EXPERT=true' >&2; exit 2
+TRAIN_SCOPE="${TRAIN_SCOPE:-joint}"
+case "$TRAIN_SCOPE" in
+  joint) SCOPE_TAG=aexpert; EXPERT=true; FROZEN=false ;;
+  expert_only) SCOPE_TAG=frozenp-aexpert; EXPERT=true; FROZEN=true ;;
+  prompt_only) SCOPE_TAG=promptonly; EXPERT=false; FROZEN=false ;;
+  *) echo 'Invalid TRAIN_SCOPE' >&2; exit 2 ;;
+esac
+if [[ "${TRAIN_ACTION_EXPERT:-$EXPERT}" != "$EXPERT" || "${FREEZE_VLM_PROMPT:-$FROZEN}" != "$FROZEN" ]]; then
+  echo 'TRAIN_ACTION_EXPERT/FREEZE_VLM_PROMPT conflict with TRAIN_SCOPE; unset them' >&2; exit 2
 fi
-export TRAIN_ACTION_EXPERT=true
+export TRAIN_ACTION_EXPERT="$EXPERT" FREEZE_VLM_PROMPT="$FROZEN"
 REPEAT_ID="${REPEAT_ID:-1}"
 [[ "$REPEAT_ID" =~ ^[1-9][0-9]*$ ]] || { echo 'Invalid REPEAT_ID' >&2; exit 2; }
 case "${DRY_RUN:-false}" in true|false) ;; *) echo 'Invalid DRY_RUN' >&2; exit 2 ;; esac
@@ -49,6 +58,7 @@ CURRICULUM_DIRECTION="${CURRICULUM_DIRECTION:-easy_to_hard}"
 case "$CURRICULUM_DIRECTION" in
   easy_to_hard) EASY_PERCENT="${EASY_PERCENT:-70}" ;;
   hard_to_easy) EASY_PERCENT="${EASY_PERCENT:-30}" ;;
+  random) EASY_PERCENT="${EASY_PERCENT:-50}" ;;
   *) echo 'Invalid CURRICULUM_DIRECTION' >&2; exit 2 ;;
 esac
 SAMPLE_SEED="${SAMPLE_SEED:-0}"
@@ -58,7 +68,7 @@ SOURCE_PAIR_DIR="${SOURCE_PAIR_DIR:-/data1/wyn/prompt-work/source-pair-r1}"
 ORDER_DIR="${ORDER_DIR:-/data1/wyn/prompt-work/ratio-curriculum/$LABEL}"
 SCORES_PATH="${SCORES_PATH:-/data1/wyn/prompt-work/frameskip-r1/scores.npz}"
 REFERENCE_RUN="${REFERENCE_RUN:-$OUTPUT_ROOT/pi05-source-r1-libero-W0-Bocc-base-vlm2-P1-D0-E1-T1}"
-export RUN_NAME="pi05-curriculum-${LABEL}-aexpert-r${REPEAT_ID}-libero-Bocc-base-vlm2-P1-D0-E1-T1"
+export RUN_NAME="pi05-curriculum-${LABEL}-${SCOPE_TAG}-r${REPEAT_ID}-libero-Bocc-base-vlm2-P1-D0-E1-T1"
 [[ ! -e "$OUTPUT_ROOT/$RUN_NAME" ]] || { echo "Output already exists: $OUTPUT_ROOT/$RUN_NAME" >&2; exit 1; }
 python -m lerobot.scripts.pi05_ratio_curriculum prepare \
   --pair "$SOURCE_PAIR_DIR" --scores "$SCORES_PATH" --reference-run "$REFERENCE_RUN" \

@@ -30,8 +30,8 @@ TRAIN = ROOT / "examples/training/train_pi05_ratio_curriculum.sh"
 EVAL = ROOT / "run_eval_libero_ratio_curriculum.sh"
 
 
-def run_name(direction="easy_to_hard", percent=70, seed=0, steps=3000):
-    return f"pi05-curriculum-{experiment.label(direction, percent, seed, steps)}-aexpert-r1-libero-Bocc-base-vlm2-P1-D0-E1-T1"
+def run_name(direction="easy_to_hard", percent=70, seed=0, steps=3000, scope="joint"):
+    return experiment.run_name(direction, percent, seed, steps, scope, repeat=1)
 
 
 @pytest.mark.parametrize("direction", experiment.DIRECTIONS)
@@ -63,9 +63,14 @@ def test_exposure_order_coverage_and_fixed_budget(tmp_path, direction, percent, 
         slots = np.flatnonzero(plan["task_index"] == task)
         frames = plan["index"][plan["order"][slots]]
         delta = np.diff(scores["score"][frames])
-        assert (delta >= 0).all() if direction == "easy_to_hard" else (delta <= 0).all()
         groups = easy[frames].astype(int)
-        assert (np.diff(groups) <= 0).all() if direction == "easy_to_hard" else (np.diff(groups) >= 0).all()
+        if direction != "random":
+            assert (delta >= 0).all() if direction == "easy_to_hard" else (delta <= 0).all()
+            assert (
+                (np.diff(groups) <= 0).all() if direction == "easy_to_hard" else (np.diff(groups) >= 0).all()
+            )
+        else:
+            assert (delta > 0).any() and (delta < 0).any()
         assert abs(groups.sum() - len(slots) * percent / 100) < 1
         for group in (False, True):
             candidates = base["index"][base["task_index"] == task]
@@ -97,9 +102,10 @@ def test_direction_only_keeps_new_sample_flow_pairs_and_repeats_get_distinct_dra
             for i, use in enumerate(ids):
                 bank[use] = (int(plan["index"][use]), flow["noise"][i], flow["time"][i])
         banks.append(bank)
-    for use, (frame, noise, time) in banks[0].items():
-        other = banks[1][use]
-        assert frame == other[0] and torch.equal(noise, other[1]) and torch.equal(time, other[2])
+    for bank in banks[1:]:
+        for use, (frame, noise, time) in banks[0].items():
+            other = bank[use]
+            assert frame == other[0] and torch.equal(noise, other[1]) and torch.equal(time, other[2])
     indices = plans[0]["index"]
     repeated = next(np.flatnonzero(indices == frame) for frame in indices if (indices == frame).sum() > 1)
     assert not torch.equal(banks[0][int(repeated[0])][1], banks[0][int(repeated[1])][1])
@@ -113,7 +119,7 @@ def test_direction_only_keeps_new_sample_flow_pairs_and_repeats_get_distinct_dra
         {"easy_percent": 70.5},
         {"sample_seed": -1},
         {"sample_seed": 2**32},
-        {"direction": "random"},
+        {"direction": "invalid"},
     ],
 )
 def test_invalid_options(kwargs):
@@ -233,19 +239,24 @@ def test_actual_training_dry_run_and_no_overwrite(
 
 
 @pytest.mark.parametrize("steps", [3000, 6000])
-def test_saved_checkpoint_and_full_evaluator_chain(prepared_inputs, tmp_path, steps):
+@pytest.mark.parametrize("scope", experiment.SCOPES)
+def test_saved_checkpoint_and_full_evaluator_chain(prepared_inputs, tmp_path, steps, scope):
     args = prepared_inputs
     experiment.prepare(**args, direction="easy_to_hard", easy_percent=70, steps=steps)
-    run = tmp_path / run_name(steps=steps)
+    run = tmp_path / run_name(steps=steps, scope=scope)
     checkpoint = run / f"checkpoints/{steps:06d}/pretrained_model"
     shutil.copytree(args["reference"] / "checkpoints/003000/pretrained_model", checkpoint)
     config = sources.read_json(checkpoint / "train_config.json")
     config.update(steps=steps, save_freq=steps)
     config["pdet"].update(enabled=True, order_plan=str(args["output"] / "plan.npz"))
-    config["policy"].update(train_action_expert=True, vlm_prompt_only=False)
+    config["policy"].update(experiment.scope_flags(scope))
     (checkpoint / "train_config.json").write_text(json.dumps(config))
     (checkpoint / "config.json").write_text(json.dumps(config["policy"]))
     weights = load_file(checkpoint / "model.safetensors")
+    if scope == "expert_only":
+        from lerobot.utils.prompt_initialization import read_initial_prompt
+
+        weights["model.vlm_prompt_tokens.weight"] = read_initial_prompt(args["pair"] / "P1.safetensors")[0]
     for prefix in (
         "paligemma_with_expert.gemma_expert.model",
         "action_in_proj",
@@ -256,7 +267,7 @@ def test_saved_checkpoint_and_full_evaluator_chain(prepared_inputs, tmp_path, st
         weights[f"model.{prefix}.weight"] = np.ones((2, 2), dtype=np.float32)
     save_file(weights, checkpoint / "model.safetensors")
     assert experiment.check_checkpoint(args["output"], run)["easy_percent"] == 70
-    wrong_name = tmp_path / run_name(percent=30, steps=steps)
+    wrong_name = tmp_path / run_name(percent=30, steps=steps, scope=scope)
     run.rename(wrong_name)
     with pytest.raises(ValueError, match="disagrees"):
         experiment.check_checkpoint(args["output"], wrong_name)
@@ -268,16 +279,27 @@ def test_saved_checkpoint_and_full_evaluator_chain(prepared_inputs, tmp_path, st
     config["keyframe_loss"] = {"mode": "off"}
     (checkpoint / "train_config.json").write_text(json.dumps(config))
     (run / "checkpoints/last").symlink_to(f"{steps:06d}")
-    env = launcher_env(args, tmp_path) | {"CKPT_ROOT": str(tmp_path), "GPU_ID": "3", "FLOW_STEPS": str(steps)}
+    env = launcher_env(args, tmp_path) | {
+        "CKPT_ROOT": str(tmp_path),
+        "GPU_ID": "3",
+        "FLOW_STEPS": str(steps),
+        "TRAIN_SCOPE": scope,
+    }
     result = subprocess.run(["bash", str(EVAL), "all"], env=env, capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "train_action_expert=True" in result.stdout
+    assert f"train_action_expert={scope != 'prompt_only'}" in result.stdout
     assert f"--policy.path={checkpoint}" in result.stdout
     assert "--policy.vlm_prompt_only=true" not in result.stdout
+    if scope == "expert_only":
+        weights["model.vlm_prompt_tokens.weight"] += 1
+        save_file(weights, checkpoint / "model.safetensors")
+        with pytest.raises(ValueError, match="Frozen P1"):
+            experiment.check_checkpoint(args["output"], run)
 
 
 @pytest.mark.parametrize("steps", [20, 40])
-def test_all_step_audit_allows_only_declared_pool_scope_order_changes(tmp_path, monkeypatch, steps):
+@pytest.mark.parametrize("scope", experiment.SCOPES)
+def test_all_step_audit_allows_only_declared_pool_scope_order_changes(tmp_path, monkeypatch, steps, scope):
     base, scores, manifest = small_inputs()
     changed = experiment.make_plan(
         base, scores, manifest, direction="easy_to_hard", easy_percent=70, steps=steps
@@ -288,7 +310,7 @@ def test_all_step_audit_allows_only_declared_pool_scope_order_changes(tmp_path, 
     policy = TinyPolicy()
     runs = [
         tmp_path / "pi05-source-r1-libero-W0-Bocc-base-vlm2-P1-D0-E1-T1",
-        tmp_path / run_name(steps=steps),
+        tmp_path / run_name(steps=steps, scope=scope),
     ]
     for run, plan in zip(runs, (base, changed), strict=True):
         budget = plan["manifest"]["steps"]
@@ -308,12 +330,12 @@ def test_all_step_audit_allows_only_declared_pool_scope_order_changes(tmp_path, 
             ),
         )
         cfg.steps, cfg.batch_size, cfg.dataset.root = budget, 2, tmp_path / "data"
-        expert = run == runs[1]
-        cfg.to_dict = lambda expert=expert, budget=budget: {
+        flags = experiment.scope_flags(scope if run == runs[1] else "prompt_only")
+        cfg.to_dict = lambda flags=flags, budget=budget: {
             "seed": 0,
             "steps": budget,
             "save_freq": budget,
-            "policy": {"vlm_prompt_only": not expert, "train_action_expert": expert},
+            "policy": flags,
         }
         for rank in (0, 1):
             streams = PDETStreams(cfg, policy, accelerator(rank))

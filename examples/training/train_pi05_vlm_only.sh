@@ -9,6 +9,7 @@ PI05 + one VLM prompt bank; default 1 token, action prompts=0, all other weights
 Ordinary flow only: no CABO, priming, bridge, LoRA or action projection training.
 TRAIN_ACTION_EXPERT=true explicitly selects VLM prompt + full action network instead;
 it requires a distinct RUN_NAME and cannot export a prompt-only initialization.
+FREEZE_VLM_PROMPT=true keeps the imported prompt fixed; requires TRAIN_ACTION_EXPERT=true.
 Defaults: 3000 steps, batch 32 PER GPU, bf16, W&B online/project prompt-learning.
 SAVE_ONLY_FINAL=true saves only the final checkpoint (003000 by default), including no step-0 snapshot.
 base uses dataset QUANTILES (as in the earlier ablation); finetuned keeps v044's saved MEAN_STD.
@@ -46,6 +47,14 @@ for arg in "${EXTRA_ARGS[@]}"; do
 done
 VLM_PROMPT_TOKENS="${VLM_PROMPT_TOKENS:-1}"
 TRAIN_ACTION_EXPERT="${TRAIN_ACTION_EXPERT:-false}"
+FREEZE_VLM_PROMPT="${FREEZE_VLM_PROMPT:-false}"
+case "$FREEZE_VLM_PROMPT" in
+  false) ;;
+  true) [[ "$TRAIN_ACTION_EXPERT" == true && -n "${PROMPT_INIT_PATH:-}" ]] || {
+    echo 'FREEZE_VLM_PROMPT requires TRAIN_ACTION_EXPERT=true and PROMPT_INIT_PATH' >&2; exit 2;
+  } ;;
+  *) echo 'Invalid FREEZE_VLM_PROMPT' >&2; exit 2 ;;
+esac
 case "$TRAIN_ACTION_EXPERT" in
   false) VLM_ONLY=true ;;
   true)
@@ -139,13 +148,16 @@ TRAIN_ARGS=(
 )
 if [[ -n "${PROMPT_INIT_PATH:-}" ]]; then TRAIN_ARGS+=(--vlm_prompt_init_path="$PROMPT_INIT_PATH"); fi
 if [[ "$TRAIN_ACTION_EXPERT" == true ]]; then TRAIN_ARGS+=(--policy.train_action_expert=true); fi
+if [[ "$FREEZE_VLM_PROMPT" == true ]]; then TRAIN_ARGS+=(--policy.freeze_vlm_prompt=true); fi
 if [[ -n "${PROMPT_EXPORT_PATH:-}" ]]; then TRAIN_ARGS+=(--vlm_prompt_export_path="$PROMPT_EXPORT_PATH"); fi
 if [[ -n "${PROMPT_EXPORT_REFERENCE:-}" ]]; then TRAIN_ARGS+=(--vlm_prompt_export_reference="$PROMPT_EXPORT_REFERENCE"); fi
 if [[ "$SAVE_ONLY_FINAL" == true ]]; then TRAIN_ARGS+=(--save_steps='[]'); fi
 LAUNCH_ARGS=(launch --num_machines=1 --num_processes="$NUM_PROCESSES" --mixed_precision="$PRECISION"
   --main_process_port="$MAIN_PROCESS_PORT" --dynamo_backend=no)
 if (( NUM_PROCESSES > 1 )); then LAUNCH_ARGS+=(--multi_gpu); fi
-if [[ "$TRAIN_ACTION_EXPERT" == true ]]; then
+if [[ "$FREEZE_VLM_PROMPT" == true ]]; then
+  echo "source=$SOURCE VLM=$VLM_PROMPT_TOKENS (frozen imported P1) action_prompts=0 trainable=action-transformer+action-maps+time-MLPs dtype=$DTYPE"
+elif [[ "$TRAIN_ACTION_EXPERT" == true ]]; then
   echo "source=$SOURCE VLM=$VLM_PROMPT_TOKENS action_prompts=0 trainable=VLM-prompt+action-transformer+action-maps+time-MLPs dtype=$DTYPE"
 else
   echo "source=$SOURCE VLM=$VLM_PROMPT_TOKENS action=0 trainable=$((VLM_PROMPT_TOKENS * 2048)) dtype=$DTYPE"
