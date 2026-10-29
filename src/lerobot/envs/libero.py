@@ -15,6 +15,8 @@
 # limitations under the License.
 from __future__ import annotations
 
+import gc
+import logging
 import os
 import re
 from collections import defaultdict
@@ -256,11 +258,50 @@ class LiberoEnv(gym.Env):
         """
         if self._env is not None:
             return
-        env = OffScreenRenderEnv(
-            bddl_file_name=self._task_bddl_file,
-            camera_heights=self.observation_height,
-            camera_widths=self.observation_width,
-        )
+        from robosuite.utils.errors import RandomizationError
+
+        # PLUS retries placement errors in reset(), but not in the constructor.
+        # Retry only this pre-episode stage; LiberoEnv.reset() still applies the
+        # same episode seed and saved init state. Never reseed inside this loop,
+        # which would reproduce the same failed placement on every attempt.
+        max_attempts = 20 if self.is_libero_plus else 1
+        for attempt in range(1, max_attempts + 1):
+            try:
+                env = OffScreenRenderEnv(
+                    bddl_file_name=self._task_bddl_file,
+                    camera_heights=self.observation_height,
+                    camera_widths=self.observation_width,
+                )
+            except RandomizationError as error:
+                if attempt == max_attempts:
+                    error.add_note(
+                        f"LIBERO constructor placement failed after {attempt} attempt(s): "
+                        f"task={self.task} task_id={self.task_id} bddl={self._task_bddl_file}"
+                    )
+                    raise
+                logging.warning(
+                    "LIBERO_INIT_RETRY task=%s task_id=%s attempt=%s/%s bddl=%s: %s",
+                    self.task,
+                    self.task_id,
+                    attempt,
+                    max_attempts,
+                    self._task_bddl_file,
+                    error,
+                )
+            else:
+                if attempt > 1:
+                    logging.info(
+                        "LIBERO_INIT_RECOVERED task=%s task_id=%s attempt=%s/%s bddl=%s",
+                        self.task,
+                        self.task_id,
+                        attempt,
+                        max_attempts,
+                        self._task_bddl_file,
+                    )
+                break
+            # A failed constructor can leave cyclic simulator / renderer objects.
+            # Collect after leaving except, when its traceback has been released.
+            gc.collect()
         env.reset()
         self._env = env
 
