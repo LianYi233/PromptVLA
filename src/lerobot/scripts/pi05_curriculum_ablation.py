@@ -144,13 +144,12 @@ def checkpoint_complete(job):
 
 
 def check_current_runtime(job, current):
+    from lerobot.scripts.curriculum_audit_utils import compare_runtime
+
     recorded = json.loads((Path(job["run"]) / "pdet/manifest-rank0.json").read_text())
-    changed = [key for key, value in current.items() if recorded.get(key) != value]
-    if changed:
-        raise ValueError(
-            f"Existing run has a different code/environment ({changed}): {job['run']}; "
-            "use a new REPEAT_ID for a fresh suite, or audit the old suite separately"
-        )
+    report = compare_runtime(recorded, current)
+    atomic_json(Path(job["run"]) / "curriculum_runtime_audit.json", report)
+    return report
 
 
 def atomic_json(path, value):
@@ -162,12 +161,20 @@ def atomic_json(path, value):
 
 def audit_suite(jobs):
     """Check actual all-step traces, not just seeds or planned manifests."""
+    from lerobot.scripts.curriculum_audit_utils import compare_runtime, normalize_path_aliases
     from lerobot.scripts.pdet_order_binding import inspect_run
 
     reference, banks, pools, orders, reports = None, set(), {}, {}, []
+    first_runtime, code_reports, path_aliases = None, [], []
     for job in jobs:
         curriculum.check_checkpoint(job["env"]["ORDER_DIR"], job["run"])
         invariant, report = inspect_run(job["run"], name_checker=curriculum.check_name)
+        runtime = {key: invariant[key] for key in ("git_commit", "source_tree_sha256", "versions", "cuda")}
+        if first_runtime is None:
+            first_runtime = runtime
+        code_reports.append({"cell": job["cell"], **compare_runtime(first_runtime, runtime)})
+        for key in ("git_commit", "source_tree_sha256"):
+            invariant.pop(key)
         scope = job["env"]["TRAIN_SCOPE"]
         policy = invariant["recipe"]["policy"]
         for key, value in curriculum.scope_flags(scope).items():
@@ -185,7 +192,11 @@ def audit_suite(jobs):
         orders[order_key] = report["order_sha256"]
         if reference is None:
             reference = invariant
-        elif reference != invariant:
+        else:
+            path_aliases.extend(
+                {"cell": job["cell"], **row} for row in normalize_path_aliases(reference, invariant)
+            )
+        if reference != invariant:
             changed = [
                 key for key in reference.keys() | invariant.keys() if reference.get(key) != invariant.get(key)
             ]
@@ -201,7 +212,9 @@ def audit_suite(jobs):
     return {
         "audit": "passed",
         "runs": reports,
-        "scope": "All realized steps: same task slots/recipe/source/code and per-key E1/T1; same occurrence pools within each ratio; identical H2E30 inputs across trainable scopes. Not numerical determinism or historical code equivalence.",
+        "code_revision": code_reports,
+        "path_aliases": path_aliases,
+        "scope": "All realized steps: same task slots/recipe/source and per-key E1/T1; same recorded code or verified audit-only edits; same occurrence pools within each ratio; identical H2E30 inputs across trainable scopes. Not numerical determinism or historical code equivalence.",
     }
 
 

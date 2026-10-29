@@ -312,6 +312,11 @@ def test_all_step_audit_allows_only_declared_pool_scope_order_changes(tmp_path, 
         tmp_path / "pi05-source-r1-libero-W0-Bocc-base-vlm2-P1-D0-E1-T1",
         tmp_path / run_name(steps=steps, scope=scope),
     ]
+    # Reproduce the real server: old manifests used /home aliases, while the
+    # suite resolves them to /data paths. The old config omitted new false flags.
+    for name in ("data", "tokenizer"):
+        (tmp_path / name).mkdir()
+        (tmp_path / f"{name}-alias").symlink_to(tmp_path / name, target_is_directory=True)
     for run, plan in zip(runs, (base, changed), strict=True):
         budget = plan["manifest"]["steps"]
         plan_path = tmp_path / f"{run.name}.npz"
@@ -329,12 +334,18 @@ def test_all_step_audit_allows_only_declared_pool_scope_order_changes(tmp_path, 
                 diagnostics=True,
             ),
         )
-        cfg.steps, cfg.batch_size, cfg.dataset.root = budget, 2, tmp_path / "data"
+        suffix = "-alias" if run == runs[0] else ""
+        cfg.steps, cfg.batch_size, cfg.dataset.root = budget, 2, tmp_path / f"data{suffix}"
         flags = experiment.scope_flags(scope if run == runs[1] else "prompt_only")
-        cfg.to_dict = lambda flags=flags, budget=budget: {
+        if run == runs[0]:
+            flags.pop("train_action_expert")
+            flags.pop("freeze_vlm_prompt")
+        flags["tokenizer_name"] = str(tmp_path / f"tokenizer{suffix}")
+        cfg.to_dict = lambda flags=flags, budget=budget, root=str(cfg.dataset.root): {
             "seed": 0,
             "steps": budget,
             "save_freq": budget,
+            "dataset": {"root": root},
             "policy": flags,
         }
         for rank in (0, 1):
@@ -358,6 +369,11 @@ def test_all_step_audit_allows_only_declared_pool_scope_order_changes(tmp_path, 
     monkeypatch.setattr(experiment, "assert_same_processors", lambda *_: None)
     report = experiment.audit(tmp_path, runs[1])
     assert report["audit"] == "inputs_and_recipe_passed"
+    assert {row["field"] for row in report["path_aliases"]} == {
+        "dataset_root",
+        "recipe.dataset.root",
+        "recipe.policy.tokenizer_name",
+    }
     assert report["sample_pools"]["reference"] != report["sample_pools"]["curriculum"]
     assert report["reference"]["bank_prefix_sha256"] == report["curriculum"]["bank_prefix_sha256"]
     assert report["bank_comparison"]["shared_keys"] == 80

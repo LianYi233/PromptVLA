@@ -177,7 +177,7 @@ def test_old_code_is_not_silently_mixed_into_a_new_suite(tmp_path):
     path.mkdir()
     (path / "manifest-rank0.json").write_text(json.dumps(recorded))
     suite.check_current_runtime({"run": str(tmp_path)}, recorded)
-    with pytest.raises(ValueError, match="different code/environment"):
+    with pytest.raises(ValueError, match="Missing/invalid recorded commit"):
         suite.check_current_runtime({"run": str(tmp_path)}, {**recorded, "git_commit": "new"})
 
 

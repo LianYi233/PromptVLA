@@ -80,6 +80,47 @@ tail -f /data1/wyn/chkpt/2601-lerobot/logs/curriculum-ablation-r2-steps6000/B.la
 已有但未完成的目录会在训练前报错；脚本不会覆盖、删除或假装自动续训它。
 只保存最终模型意味着6000步之前中断时没有中途checkpoint可供续训。
 
+### 6000步结束后因路径别名审计失败的恢复
+
+如果B组已输出 `End of training`，随后审计报告 `recipe` / `dataset_root` 不同，
+先核对具体字段。已修复 `/home/wyn/...` 软链接与 `/data/...` 真实路径被误判的问题：
+仅在两个路径都是已存在的本地目录，且 `samefile()` 确认指向同一目录时，
+规范化 dataset_root、recipe.dataset.root、recipe.policy.tokenizer_name；其他差异仍拒绝。
+审计报告保留原路径和解析结果，失败时打印具体字段和值。不会修改旧manifest。
+
+B有完整006000、C被停止且没有最终模型的情况，更新代码后运行：
+
+```bash
+conda activate lerobot
+cd /home/wyn/VLAA/PromptVLA
+git pull --ff-only origin feat/keyframe-loss-curriculum
+
+python examples/analysis/recover_curriculum_ablation.py --archive-cell C
+```
+
+恢复脚本先锁定队列、检查旧进程组已退出，并重新核验B的最终checkpoint、全步输入、
+配方及代码兼容性。验证通过后保留B，把C移到输出根目录的 `.interrupted/` 时间戳目录，
+保留其PDET/rank记录及旧训练日志；不删除模型，不启动训练。若C已有任何最终模型文件，
+脚本会停止要求检查，不会把可能已保存的模型归档。可用 `--directory` 指定其他队列日志目录。
+
+这次修复只调整审计逻辑。复用旧B时，代码检查会重建两个Git版本的完整源文件哈希，
+要求与各自PDET记录一致，再确认采样/训练/启动代码未变；只允许指定审计函数和独立审计工具变化。
+模型、优化器、采样计划生成或启动参数变化仍拒绝；无法验证的历史未提交修改也拒绝。
+`curriculum_runtime_audit.json` 与最终suite审计保留兼容性记录，不将它等同于数值确定性。
+
+随后使用**相同r2编号**重新启动；追加总日志，不覆盖上次报错：
+
+```bash
+nohup env REPEAT_ID=2 FLOW_STEPS=6000 \
+  GPU_IDS_A=0,1 GPU_IDS_B=2,3 PORT_A=29588 PORT_B=29589 \
+  bash examples/training/train_pi05_curriculum_ablation.sh \
+    --wandb.enable=true --wandb.project=prompt-learning \
+    --wandb.mode=online --wandb.disable_artifact=true \
+  >> /data1/wyn/chkpt/2601-lerobot/logs/curriculum-ablation-r2-launch.log 2>&1 &
+```
+
+队列再次核验并跳过B，只重跑C；C完成后自动接第2、3、4轮。每组仍只保留最终006000。
+
 ## 名称和匹配规则
 
 默认输出根目录：`/data1/wyn/chkpt/2601-lerobot/PromptVLA`。

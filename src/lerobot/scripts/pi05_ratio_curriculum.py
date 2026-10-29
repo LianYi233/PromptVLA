@@ -388,6 +388,7 @@ def check_checkpoint(directory, run):
 
 
 def audit(directory, run):
+    from lerobot.scripts.curriculum_audit_utils import differences, normalize_path_aliases
     from lerobot.scripts.pdet_order_binding import inspect_run
 
     record = check(directory)
@@ -425,9 +426,12 @@ def audit(directory, run):
         policy.pop("train_action_expert", None)
         policy.pop("freeze_vlm_prompt", None)
         policy["vlm_prompt_only"] = True
+    aliases = normalize_path_aliases(old, new)
     if old != new:
-        changed = [key for key in old.keys() | new.keys() if old.get(key) != new.get(key)]
-        raise ValueError(f"Unexpected changes beyond resampling, order and action-expert training: {changed}")
+        raise ValueError(
+            "Unexpected changes beyond resampling, order and action-expert training: "
+            + json.dumps(differences(old, new), ensure_ascii=False)
+        )
     if old_report["bank_prefix_sha256"] != new_report["bank_prefix_sha256"]:
         raise ValueError("Realized indexed noise/time bank changed on shared keys")
     assert_same_processors(
@@ -439,6 +443,7 @@ def audit(directory, run):
         "settings": record["settings"],
         "steps": steps,
         "reference_steps": reference_steps,
+        "path_aliases": aliases,
         "exposure": record["plan"]["difficulty_sampling"],
         "reference": old_report,
         "curriculum": new_report,
