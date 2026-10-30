@@ -12,6 +12,7 @@ PLUS: all 10030 variants, exactly 1 episode each. PRO: 5 dimensions x 40 tasks, 
 PRO_DIMENSIONS=all or comma-separated object,swap,lan,task,env; no missing dimensions silently skipped.
 Controls: RUN_NAME, CKPT_ROOT, CHECKPOINT_STEP=6000, TOKENIZER_PATH, GPU_ID, EVAL_SEED=1000,
           BASE_OUTPUT, EVAL_LOG_ROOT, EPISODES_PER_TASK (PRO only), PROGRESS=true, DRY_RUN=false.
+TRAIN_SCOPE=joint|expert_only|prompt_only (default joint); validate the saved training scope.
 Independent suite invocations can run on different GPUs. Full checkpoints + saved processors are used.
 Outputs: one progress bar, suite/category success rates, task-level resume; no videos.
 EOF
@@ -27,6 +28,8 @@ export CKPT_ROOT="${CKPT_ROOT:-/data1/wyn/chkpt/2601-lerobot/PromptVLA}"
 export CHECKPOINT_STEP="${CHECKPOINT_STEP:-6000}" EVAL_SEED="${EVAL_SEED:-1000}"
 export GPU_ID="${GPU_ID:-0}" TOKENIZER_PATH="${TOKENIZER_PATH:-/home/wyn/models/paligemma-3b-pt-224}"
 PROGRESS="${PROGRESS:-true}"; DRY_RUN="${DRY_RUN:-false}"
+TRAIN_SCOPE="${TRAIN_SCOPE:-joint}"
+case "$TRAIN_SCOPE" in joint|expert_only|prompt_only) ;; *) echo 'Invalid TRAIN_SCOPE' >&2; exit 2 ;; esac
 for value in "$PROGRESS" "$DRY_RUN"; do
   case "$value" in true|false) ;; *) echo 'PROGRESS/DRY_RUN must be true/false' >&2; exit 2 ;; esac
 done
@@ -63,7 +66,7 @@ mkdir -p "$EVAL_LOG_ROOT"
 LOG="$EVAL_LOG_ROOT/${RUN_NAME}-${STEP_PADDED}-${MODE}-seed${EVAL_SEED}-ep${EPISODES_PER_TASK}-dims${PRO_DIMENSIONS//,/-}.log"
 echo "Checking $KIND resources and checkpoint $STEP_PADDED; log=$LOG"
 if ! {
-  python -m lerobot.scripts.libero_robustness checkpoint "$CHECKPOINT" &&
+  python -m lerobot.scripts.libero_robustness_checkpoint "$CHECKPOINT" --scope "$TRAIN_SCOPE" &&
   python -m lerobot.scripts.libero_robustness prepare --root "$BENCHMARK_ROOT" --directory "$PROTOCOL_DIR" \
     --benchmark "$KIND" --mode "$MODE" --dimensions "$PRO_DIMENSIONS" --episodes "$EPISODES_PER_TASK" --seed "$EVAL_SEED"
 } >"$LOG" 2>&1; then
@@ -74,7 +77,7 @@ if [[ "$DRY_RUN" == true ]]; then
   exit 0
 fi
 if [[ "$PROGRESS" == true ]]; then
-  exec 3>&1
+  exec 3>&2
   export LIBERO_PROGRESS_FD=3 LIBERO_PROGRESS_LABEL="$KIND/$MODE"
 fi
 if ! bash "$SCRIPT_DIR/run_eval_libero-full.sh" vlm_only "$MODE" 0 >>"$LOG" 2>&1; then

@@ -222,14 +222,19 @@ def test_summary_uses_all_tasks_and_rejects_missing_duplicate_or_empty(fork, tmp
             robust.summarize(directory / "manifest.json", path)
 
 
-def test_actual_launcher_uses_full_checkpoint_pro_suites_and_rejects_invalid_weights(fork, tmp_path):
+@pytest.mark.parametrize("scope", ("joint", "expert_only", "prompt_only"))
+def test_actual_launcher_uses_full_checkpoint_pro_suites_and_rejects_invalid_weights(fork, tmp_path, scope):
     fixture = fixtures.VLMOnlyTest()
     fixture.setUp()
     try:
         checkpoint = fixture.work / "checkpoints/robust-model/checkpoints/006000/pretrained_model"
         fixture.make_model(checkpoint, "base", tokens=2)
         config = json.loads((checkpoint / "config.json").read_text())
-        config.update(vlm_prompt_only=False, train_action_expert=True)
+        config.update(
+            vlm_prompt_only=scope == "prompt_only",
+            train_action_expert=scope != "prompt_only",
+            freeze_vlm_prompt=scope == "expert_only",
+        )
         (checkpoint / "config.json").write_text(json.dumps(config))
         weights = load_file(checkpoint / "model.safetensors")
         for name in (
@@ -242,6 +247,7 @@ def test_actual_launcher_uses_full_checkpoint_pro_suites_and_rejects_invalid_wei
             weights[f"model.{name}.weight"] = np.ones(1, dtype=np.float32)
         save_file(weights, checkpoint / "model.safetensors")
         env = fixture.env | {
+            "TRAIN_SCOPE": scope,
             "RUN_NAME": "robust-model",
             "BENCHMARK_ROOT": str(fork),
             "PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"],
@@ -264,7 +270,7 @@ def test_actual_launcher_uses_full_checkpoint_pro_suites_and_rejects_invalid_wei
             "--env.task=libero_goal_object,libero_goal_swap,libero_goal_lan,libero_goal_task,libero_goal_env"
             in command
         )
-        config["train_action_expert"] = False
+        config["train_action_expert"] = not config["train_action_expert"]
         (checkpoint / "config.json").write_text(json.dumps(config))
         result = subprocess.run(
             ["bash", str(ROOT / "run_eval_libero_robustness.sh"), "pro", "libero_goal"],
@@ -273,7 +279,7 @@ def test_actual_launcher_uses_full_checkpoint_pro_suites_and_rejects_invalid_wei
             text=True,
             timeout=60,
         )
-        assert result.returncode != 0 and "Expected train_action_expert=True" in result.stderr
+        assert result.returncode != 0 and "Expected train_action_expert=" in result.stderr
     finally:
         fixture.doCleanups()
 
