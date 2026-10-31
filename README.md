@@ -34,6 +34,8 @@ FrameSkip 风格课程实验：见 [评分、双卡训练与评估说明](exampl
 
 97.75%参考设置的四轮消融：见 [一次启动8组顺序、比例和训练模块对照](examples/analysis/README_pi05_curriculum_ablation.md)。`train_pi05_curriculum_ablation.sh` 自动在GPU0/1和GPU2/3并行每轮两组、逐轮接续，默认r2、每组6000步仅保存最终模型。新增task内随机顺序、保留并冻结P1的expert-only及prompt-only对照，同一比例保留样本使用池与Bocc噪声配对，全部结束自动跨组审计。
 
+D/E/F 新种子重复：见 [D1/E1/F1、D2/E2/F2 一次启动说明](examples/analysis/README_curriculum_seed_repeat.md)。保持50/50、VLM2+完整Action Expert、6000步和每组双卡×batch32，默认使用两套新P/D/E/T/global/S种子2、3；组内匹配样本池和Bocc噪声，只改变课程顺序。自动导出初始prompt、四卡分三轮训练六个模型，每次只保存最终006000。
+
 两样本顺序对照：见 [同一对简单/困难观测，交换两个3000步阶段](examples/analysis/README_pi05_two_frame.md)。复用评分缓存，选同 task/episode 的两个完整、不重叠动作窗口；E2H/H2E 各训练6000步、曝光各半，固定帧与噪声配对，仅训练VLM2+完整action expert。四卡并行两组，记录两个训练样本各自的固定损失，只保存最终006000。
 
 LIBERO-PRO / PLUS 泛化评估：见 [完整动作网络checkpoint的独立基准入口](examples/analysis/README_libero_robustness.md)。`run_eval_libero_robustness.sh` 校验并选择指定fork，加载保存的VLM2+action expert及处理器，支持任务级恢复、单行进度、按扰动类别汇总；PLUS严格检查10030个变体，PRO可明确选择已备齐资源的维度，不把部分评测标成全量。

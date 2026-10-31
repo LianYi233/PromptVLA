@@ -218,7 +218,7 @@ def audit_suite(jobs):
     }
 
 
-def run_round(jobs, statuses, state_path, log, *, poll_seconds=1):
+def run_round(jobs, statuses, state_path, log, *, poll_seconds=1, checkpoint_validator=None):
     """Round barrier; a failed child stops both lanes and all following rounds."""
     active = []
     try:
@@ -258,7 +258,7 @@ def run_round(jobs, statuses, state_path, log, *, poll_seconds=1):
                 statuses[job["cell"]]["state"] = "verifying"
                 atomic_json(state_path, statuses)
                 try:
-                    checkpoint_complete(job)
+                    (checkpoint_validator or checkpoint_complete)(job)
                 except Exception:
                     statuses[job["cell"]]["state"] = "verification_failed"
                     atomic_json(state_path, statuses)
