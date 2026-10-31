@@ -12,11 +12,19 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 SELF = "src/lerobot/scripts/curriculum_audit_utils.py"
-# Only post-training validation bodies may differ. Plan generation, launch
-# arguments, model/trainer code and every other source file remain protected.
+# Only named validation/recovery orchestration bodies may differ. Plan generation,
+# build_jobs/launch arguments, model/trainer code and other source remain protected.
 AUDIT_FUNCTIONS = {
     "src/lerobot/scripts/pi05_ratio_curriculum.py": {"audit"},
     "src/lerobot/scripts/pi05_curriculum_ablation.py": {"check_current_runtime", "audit_suite"},
+    "src/lerobot/scripts/pi05_curriculum_seed_repeat.py": {
+        "audit_suite",
+        "main",
+        "run_processes",
+        "log_tail",
+        "archive_incomplete",
+        "existing_runs",
+    },
 }
 
 
@@ -141,7 +149,7 @@ def _training_sources(sources):
 
 
 def compare_runtime(reference, candidate, *, repo_root=ROOT):
-    """Allow only verified audit edits; reject environment drift and dirty source hashes."""
+    """Allow named audit/recovery edits; reject environment drift and dirty source hashes."""
     for key in ("versions", "cuda"):
         if reference.get(key) != candidate.get(key):
             raise ValueError(f"Different code/environment: {key}")
@@ -169,5 +177,5 @@ def compare_runtime(reference, candidate, *, repo_root=ROOT):
         "records": records,
         "changed_source_paths": [row["field"] for row in differences(*versions)],
         "scope": "Both recorded source hashes match their Git trees; training/plan/launcher code is "
-        "unchanged outside named audit bodies and their helper. Not numerical determinism.",
+        "unchanged outside named audit/recovery bodies and their helper. Not numerical determinism.",
     }

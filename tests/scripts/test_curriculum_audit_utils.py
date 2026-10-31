@@ -58,6 +58,7 @@ def repository(tmp_path):
         "src/lerobot/scripts/pi05_ratio_curriculum.py": "def make_plan():\n    return 42\n\ndef audit():\n    return 'old'\n",
         "src/lerobot/scripts/pi05_curriculum_ablation.py": "def build_jobs():\n    return 42\n\ndef check_current_runtime():\n    return 'old'\n"
         "\ndef audit_suite():\n    return 'old'\n",
+        "src/lerobot/scripts/pi05_curriculum_seed_repeat.py": "def build_jobs():\n    return 42\n\ndef main():\n    return 'old'\n",
         "src/lerobot/policies/model.py": "WEIGHT = 1\n",
         "examples/training/train.sh": "echo train\n",
     }
@@ -128,4 +129,24 @@ def test_training_plan_launcher_and_model_changes_are_rejected(repository, path)
     git(repository, "add", ".")
     git(repository, "commit", "-qm", "training changed")
     with pytest.raises(ValueError, match="Training-relevant"):
+        audit.compare_runtime(old, record(repository), repo_root=repository)
+
+
+def test_seed_recovery_is_compatible_but_job_recipe_changes_are_not(repository):
+    old = record(repository)
+    path = repository / "src/lerobot/scripts/pi05_curriculum_seed_repeat.py"
+    path.write_text(
+        path.read_text().replace("return 'old'", "return 'recovered'")
+        + "\ndef archive_incomplete():\n    return 'backup'\n"
+    )
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "recovery only")
+    assert (
+        audit.compare_runtime(old, record(repository), repo_root=repository)["status"]
+        == "audit_only_changes_verified"
+    )
+    path.write_text(path.read_text().replace("return 42", "return 43"))
+    git(repository, "add", ".")
+    git(repository, "commit", "-qm", "changed training jobs")
+    with pytest.raises(ValueError, match="Training-relevant source changes"):
         audit.compare_runtime(old, record(repository), repo_root=repository)

@@ -354,3 +354,99 @@ def test_one_invocation_runs_three_rounds_without_continuing_previous_weights(tm
                 rows.index(f"START {c}") for c in later
             )
     assert {v["state"] for v in json.loads((directory / "status.json").read_text()).values()} == {"complete"}
+
+
+def test_recovery_archives_only_partial_outputs_and_preserves_initializations(tmp_path):
+    jobs, directory = jobs_at(tmp_path)
+    directory.mkdir(parents=True)
+    job = jobs[0]
+    run = Path(job["run"])
+    (run / "pdet").mkdir(parents=True)
+    (run / "pdet/manifest-rank0.json").write_text('{"partial": true}')
+    launch = directory / "D1.launch.log"
+    launch.write_text("Training: 2/6000\nTraceback: original failure\n")
+    native = Path(job["env"]["LOG_ROOT"]) / f"{job['name']}.log"
+    native.write_text("native failure\n")
+    (directory / "status.json").write_text('{"D1": {"state": "failed"}}')
+    write_init(job)
+    prompt = Path(job["env"]["PROMPT_INIT_PATH"]).read_bytes()
+    messages = []
+    with pytest.raises(ValueError, match="RESTART_INCOMPLETE=true"):
+        suite.existing_runs(jobs, directory, {}, messages.append)
+    suite.existing_runs(jobs, directory, {}, messages.append, restart=True, dry=True)
+    assert run.is_dir() and launch.is_file()
+    assert not (run.parent / "_incomplete_backups").exists()
+    states = suite.existing_runs(jobs, directory, {}, messages.append, restart=True)
+    assert {v["state"] for v in states.values()} == {"pending"}
+    assert not run.exists() and not launch.exists()
+    backups = list((run.parent / "_incomplete_backups").iterdir())
+    assert len(backups) == 1
+    backup = backups[0]
+    assert (backup / "run/pdet/manifest-rank0.json").is_file()
+    assert "original failure" in (backup / "previous-launch.log").read_text()
+    assert (backup / native.name).read_text() == "native failure\n"
+    assert json.loads((backup / "status.json").read_text())["D1"]["state"] == "failed"
+    assert json.loads((backup / "recovery.json").read_text())["original_run"] == str(run)
+    assert Path(job["env"]["PROMPT_INIT_PATH"]).read_bytes() == prompt
+    assert any("original failure" in line for line in messages)
+
+
+def test_recovery_retains_final_models_even_if_validation_fails(tmp_path, monkeypatch):
+    jobs, directory = jobs_at(tmp_path)
+    directory.mkdir(parents=True)
+    # D1 is partial; D2 has final weights but an audit error. Neither may move.
+    Path(jobs[0]["run"]).mkdir(parents=True)
+    weights = Path(jobs[1]["run"]) / "checkpoints/006000/pretrained_model/model.safetensors"
+    weights.parent.mkdir(parents=True)
+    weights.write_bytes(b"saved model")
+
+    def invalid(_job):
+        raise ValueError("bad processor statistics")
+
+    monkeypatch.setattr(suite, "check_checkpoint", invalid)
+    with pytest.raises(ValueError, match="bad processor"):
+        suite.existing_runs(jobs, directory, {}, lambda _: None, restart=True)
+    assert Path(jobs[0]["run"]).is_dir() and weights.read_bytes() == b"saved model"
+    assert not (Path(jobs[0]["env"]["OUTPUT_ROOT"]) / "_incomplete_backups").exists()
+
+
+def test_recovery_skips_verified_final_model(tmp_path, monkeypatch):
+    jobs, directory = jobs_at(tmp_path)
+    directory.mkdir(parents=True)
+    job = jobs[0]
+    weights = Path(job["run"]) / "checkpoints/006000/pretrained_model/model.safetensors"
+    weights.parent.mkdir(parents=True)
+    weights.write_bytes(b"saved model")
+    runtime = {"git_commit": "same", "source_tree_sha256": "same", "versions": {}, "cuda": None}
+    monkeypatch.setattr(suite, "check_checkpoint", lambda _: (runtime, {}))
+    statuses = suite.existing_runs(jobs, directory, runtime, lambda _: None, restart=True)
+    assert statuses["D1"]["state"] == "complete"
+    assert weights.is_file()
+
+
+def test_recovery_rejects_symlinks_and_live_training(tmp_path, monkeypatch):
+    jobs, directory = jobs_at(tmp_path)
+    directory.mkdir(parents=True)
+    run = Path(jobs[0]["run"])
+    run.parent.mkdir(parents=True)
+    run.symlink_to(tmp_path / "missing", target_is_directory=True)
+    with pytest.raises(ValueError, match="real output directory"):
+        suite.existing_runs(jobs, directory, {}, lambda _: None, restart=True)
+    run.unlink()
+    run.mkdir()
+    monkeypatch.setattr(suite, "run_processes", lambda _: [456])
+    with pytest.raises(ValueError, match="still active"):
+        suite.existing_runs(jobs, directory, {}, lambda _: None, restart=True)
+    assert run.is_dir()
+
+
+def test_process_detection_matches_exact_output_path(tmp_path):
+    run = tmp_path / "run"
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(15)", f"--output_dir={run}"])
+    try:
+        # /proc can expose host PIDs while Popen returns namespace-local PIDs.
+        assert suite.run_processes(run)
+        assert not suite.run_processes(tmp_path / "run-other")
+    finally:
+        child.terminate()
+        child.wait(timeout=10)

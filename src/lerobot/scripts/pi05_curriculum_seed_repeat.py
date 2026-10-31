@@ -344,9 +344,17 @@ def check_checkpoint(job):
 
 
 def audit_suite(jobs):
+    from lerobot.scripts.curriculum_audit_utils import compare_runtime
+
     invariants, reports = {}, []
+    reference_runtime, code_reports = None, []
     for job in jobs:
         invariant, report = check_checkpoint(job)
+        if reference_runtime is None:
+            reference_runtime = copy.deepcopy(invariant)
+        code_reports.append({"cell": job["cell"], **compare_runtime(reference_runtime, invariant)})
+        for key in ("git_commit", "source_tree_sha256"):
+            invariant.pop(key, None)
         invariants[job["cell"]] = invariant
         reports.append({"cell": job["cell"], "seed": job["seed"], **report})
     for block in (1, 2):
@@ -376,8 +384,130 @@ def audit_suite(jobs):
         "audit": "passed",
         "protocol": PROTOCOL,
         "runs": reports,
+        "code_revision": code_reports,
         "scope": "Full realized traces: only order differs within each triplet; fresh P/D/E/T/global/S across triplets. Not numerical determinism or historical code equivalence.",
     }
+
+
+def run_processes(run):
+    """Find only processes whose exact output_dir targets this run; never kill them."""
+    run = str(Path(run).resolve())
+    found = []
+    for path in Path("/proc").glob("[0-9]*/cmdline"):
+        try:
+            args = path.read_bytes().decode(errors="replace").split("\0")
+        except OSError:
+            continue
+        for i, arg in enumerate(args):
+            value = arg.removeprefix("--output_dir=") if arg.startswith("--output_dir=") else None
+            if arg == "--output_dir" and i + 1 < len(args):
+                value = args[i + 1]
+            if value and str(Path(value).resolve()) == run:
+                found.append(int(path.parent.name))
+                break
+    return found
+
+
+def log_tail(path, log):
+    """Expose child failure context without scanning the entire progress log."""
+    path = Path(path)
+    if not path.is_file():
+        return
+    with path.open("rb") as stream:
+        stream.seek(max(0, path.stat().st_size - 16384))
+        lines = stream.read().decode(errors="replace").replace("\r", "\n").splitlines()
+    log(f"Last child output: {path}")
+    for line in [line for line in lines if line.strip()][-60:]:
+        log(f"  {line}")
+
+
+def archive_incomplete(job, directory, log):
+    """Move an incomplete run on the same filesystem; retain its logs and provenance."""
+    import shutil
+    import uuid
+
+    run, root = Path(job["run"]), Path(job["env"]["OUTPUT_ROOT"])
+    if run.is_symlink() or not run.is_dir() or run.parent.resolve() != root.resolve():
+        raise ValueError(f"Recovery requires a real run directory directly under OUTPUT_ROOT: {run}")
+    final = run / "checkpoints/006000/pretrained_model"
+    if any(
+        (final / name).exists() or (final / name).is_symlink()
+        for name in ("model.safetensors", "model.safetensors.index.json")
+    ):
+        raise ValueError(f"Final weights exist; inspect validation instead of automatic retraining: {run}")
+    if pids := run_processes(run):
+        raise ValueError(f"Run is still active (PIDs={pids}); not moving it: {run}")
+    stamp = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
+    bundle = root / "_incomplete_backups" / f"{job['name']}--{stamp}"
+    bundle.mkdir(parents=True, exist_ok=False)
+    logs = (
+        directory / f"{job['cell']}.launch.log",
+        directory / f"{job['cell']}.preflight.log",
+        directory / "status.json",
+        directory / "jobs.json",
+        Path(job["env"]["LOG_ROOT"]) / f"{job['name']}.log",
+    )
+    for path in logs:
+        if path.is_file():
+            shutil.copy2(path, bundle / path.name)
+    runner.atomic_json(
+        bundle / "recovery.json",
+        {
+            "cell": job["cell"],
+            "original_run": str(run),
+            "archived_run": str(bundle / "run"),
+            "seed": job["seed"],
+            "prompt_init": job["env"]["PROMPT_INIT_PATH"],
+            "plan": str(Path(job["env"]["ORDER_DIR"]) / "plan.npz"),
+            "reason": "Explicit RESTART_INCOMPLETE=true; final weights absent; fresh training, not resume",
+        },
+    )
+    run.rename(bundle / "run")
+    # Preserve the old launch log but start a new per-cell display for this attempt.
+    launch = directory / f"{job['cell']}.launch.log"
+    if launch.is_file():
+        launch.rename(bundle / "previous-launch.log")
+    log(f"ARCHIVED {job['cell']}: {bundle}; restarting from the same pretrained source and prompt")
+    return bundle
+
+
+def existing_runs(jobs, directory, runtime, log, *, restart=False, dry=False):
+    from lerobot.scripts.curriculum_audit_utils import compare_runtime
+
+    statuses = {job["cell"]: {"state": "pending"} for job in jobs}
+    incomplete = []
+    # Inspect all six before moving any directory or launching any GPU work.
+    for job in jobs:
+        run = Path(job["run"])
+        if not run.exists() and not run.is_symlink():
+            continue
+        if run.is_symlink() or not run.is_dir():
+            raise ValueError(f"Expected a real output directory: {run}")
+        if pids := run_processes(run):
+            raise ValueError(f"Run is still active (PIDs={pids}); not restarting it: {run}")
+        final = run / "checkpoints/006000/pretrained_model"
+        if any(
+            (final / name).exists() or (final / name).is_symlink()
+            for name in ("model.safetensors", "model.safetensors.index.json")
+        ):
+            invariant, _ = check_checkpoint(job)
+            compare_runtime(invariant, runtime)
+            statuses[job["cell"]]["state"] = "complete"
+        elif restart:
+            incomplete.append(job)
+        else:
+            raise ValueError(
+                f"Incomplete run: {run}. Inspect {directory / (job['cell'] + '.launch.log')}; "
+                "use RESTART_INCOMPLETE=true to archive this partial output and restart from step zero."
+            )
+    for job in incomplete:
+        log(f"PREVIOUS ATTEMPT {job['cell']}: saved output before recovery (not a new failure)")
+        log_tail(directory / f"{job['cell']}.launch.log", log)
+        if dry:
+            log(f"WOULD ARCHIVE {job['cell']}: {job['run']} (dry run; no files moved)")
+        else:
+            archive_incomplete(job, directory, log)
+    return statuses
 
 
 def main():
@@ -391,6 +521,9 @@ def main():
     dry = os.environ.get("DRY_RUN", "false")
     if dry not in ("true", "false"):
         raise ValueError("DRY_RUN must be true or false")
+    restart = os.environ.get("RESTART_INCOMPLETE", "false")
+    if restart not in ("true", "false"):
+        raise ValueError("RESTART_INCOMPLETE must be true or false")
     directory.mkdir(parents=True, exist_ok=True)
     with (directory / ".lock").open("w") as lock:
         try:
@@ -405,7 +538,6 @@ def main():
                 stream.write(line + "\n")
 
             prepare(jobs)
-            runner.atomic_json(directory / "jobs.json", jobs)
             if args.command == "audit":
                 runner.atomic_json(directory / "audit.json", audit_suite(jobs))
                 log(f"All six passed: {directory / 'audit.json'}")
@@ -415,19 +547,15 @@ def main():
             runtime = runtime_info()
             for job in jobs:
                 log(f"PLAN {job['cell']} GPUs={job['env']['GPU_IDS']} seed={job['seed']}: {job['name']}")
-            # Reject partial old runs BEFORE any new model construction/training.
-            statuses = {job["cell"]: {"state": "pending"} for job in jobs}
-            for job in jobs:
-                if Path(job["run"]).exists():
-                    invariant, _ = check_checkpoint(job)
-                    if any(invariant[key] != runtime[key] for key in runtime):
-                        raise ValueError("Existing run used different code/environment; not silently mixed")
-                    statuses[job["cell"]]["state"] = "complete"
+            statuses = existing_runs(
+                jobs, directory, runtime, log, restart=restart == "true", dry=dry == "true"
+            )
+            runner.atomic_json(directory / "jobs.json", jobs)
             state_path = directory / "status.json"
-            runner.atomic_json(state_path, statuses)
             if dry == "true":
                 log(f"CPU plans validated; no GPU export/training. Commands: {directory / 'jobs.json'}")
                 return
+            runner.atomic_json(state_path, statuses)
             for job in jobs[:2]:
                 log(f"Validate/export fresh native P{job['seed']} (zero updates)")
                 ensure_init(job, directory)
@@ -457,13 +585,19 @@ def main():
                             "Code/environment changed while suite was running; stop to avoid mixing"
                         )
                     log(f"ROUND {round_id}/3")
-                    runner.run_round(
-                        [job for job in jobs if job["round"] == round_id],
-                        statuses,
-                        state_path,
-                        log,
-                        checkpoint_validator=check_checkpoint,
-                    )
+                    try:
+                        runner.run_round(
+                            [job for job in jobs if job["round"] == round_id],
+                            statuses,
+                            state_path,
+                            log,
+                            checkpoint_validator=check_checkpoint,
+                        )
+                    except Exception:
+                        for cell, status in statuses.items():
+                            if status["state"] in ("failed", "verification_failed"):
+                                log_tail(directory / f"{cell}.launch.log", log)
+                        raise
                 runner.atomic_json(directory / "audit.json", audit_suite(jobs))
                 log(f"DONE all six; final checkpoints verified. Audit: {directory / 'audit.json'}")
             finally:

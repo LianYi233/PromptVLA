@@ -70,7 +70,32 @@ cat /data1/wyn/chkpt/2601-lerobot/logs/curriculum-def-seeds-2-3/status.json
 tail -f /data1/wyn/chkpt/2601-lerobot/logs/curriculum-def-seeds-2-3/D1.launch.log
 ```
 
-`jobs.json` 保存六个名称、所有命令和分配的 GPU。已完成且通过最终模型/全步轨迹/运行时校验的模型会跳过；部分输出不会覆盖、删除或假装恢复。失败会停止本轮和后续轮次。每次只存最终模型，因此未完成训练没有可自动恢复的中间 checkpoint。运行期间不要更新代码或依赖，以免不同组使用不同实现。
+`jobs.json` 保存六个名称、所有命令和分配的 GPU。已完成且通过最终模型/全步轨迹/运行时校验的模型会跳过；默认拒绝覆盖部分输出。失败会停止本轮和后续轮次，并在主日志显示失败子进程的最后输出。每次只存最终模型，因此未完成训练没有可自动恢复的中间 checkpoint。运行期间不要更新代码或依赖，以免不同组使用不同实现。
+
+### 上次失败、目录已存在时
+
+先确认上一个调度程序已退出。重新启动时在 `nohup env` 后加入 **`RESTART_INCOMPLETE=true`**：
+
+```bash
+LAUNCH_LOG="/data1/wyn/chkpt/2601-lerobot/logs/curriculum-def-recovery-$(date +%Y%m%d-%H%M%S).log"
+nohup env DRY_RUN=false RESTART_INCOMPLETE=true \
+  GPU_IDS_A=0,1 GPU_IDS_B=2,3 PORT_A=29592 PORT_B=29593 \
+  SEED_SET_1=2 SEED_SET_2=3 \
+  bash examples/training/train_pi05_curriculum_seed_repeat.sh run \
+    --wandb.enable=true --wandb.project=prompt-learning \
+    --wandb.mode=online --wandb.disable_artifact=true \
+  > "$LAUNCH_LOG" 2>&1 &
+tail -f "$LAUNCH_LOG"
+```
+
+脚本先检查全部六组，再把**没有最终权重**的未完成输出移动到
+`OUTPUT_ROOT/_incomplete_backups/<原名称>--<时间戳>/run/`，保留旧日志、状态和恢复记录；不删除任何模型。
+这些组从同一预训练模型、同一初始 prompt、同一计划重新训练6000步，而不是从中间步继续。
+P2/P3 `.safetensors` 及计划文件保持原位，验证通过后直接复用。
+仍有训练进程使用该目录、输出目录是软链接、或已有最终权重但校验未通过时，都不会自动备份重训。
+`DRY_RUN=true RESTART_INCOMPLETE=true` 仅显示将备份哪些目录，不移动它们。
+
+完成模型可跨本次**已验证的恢复/审计代码改动**复用，但模型、采样、初始化、训练参数生成或依赖版本的变化仍然拒绝混用。这一恢复选项解决目录阻塞，不等于已经确定此前训练中断的根因；旧的错误末尾会在主日志显示，完整记录保存在备份内。
 
 完成后自动写 `audit.json`，亦可手动重跑：
 
