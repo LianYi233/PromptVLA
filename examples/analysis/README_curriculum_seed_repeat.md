@@ -104,3 +104,52 @@ bash examples/training/train_pi05_curriculum_seed_repeat.sh audit
 ```
 
 检查每组内部真实使用的每一个样本/ε/t 配对、相同训练配置/代码、不同课程顺序，以及两组之间确实不同的 prompt 与随机输入。该检查不宣称逐位数值确定性，也不宣称与历史代码完全等价。后续评价应使用与原 D/E/F 相同的评估 seed=1000、每 task 10 episodes 和 PRO 扰动维度；对每套种子分别计算 D−F、D−E，再汇总三套训练结果，不把每个 rollout 当作独立的训练重复。
+
+## 训练完成：六组 LIBERO-PRO 四卡评测
+
+使用此前能够运行 PRO 的 `promptvla-eval` 环境。专用入口识别 D1/E1/F1（训练种子2）和 D2/E2/F2（训练种子3）；所有模型的**评估 seed 都是1000**。复用原 A–H 评测器、checkpoint/processor 校验、task-level 断点续测和完整结果校验，不修改底层仿真协议。
+
+```bash
+conda activate promptvla-eval
+cd /home/wyn/VLAA/PromptVLA
+
+export CKPT_ROOT=/data1/wyn/chkpt/2601-lerobot/PromptVLA
+export BASE_OUTPUT="$CKPT_ROOT/eval/curriculum-def-seeds-2-3"
+export EVAL_LOG_ROOT=/data1/wyn/chkpt/2601-lerobot/logs/eval/curriculum-def-seeds-2-3
+export BENCHMARK_ROOT=/home/wyn/VLAA/LIBERO-PRO
+export TOKENIZER_PATH=/home/wyn/models/paligemma-3b-pt-224
+export SEED_SET_1=2 SEED_SET_2=3
+export GPU_IDS=0,1,2,3 CELLS="D1 D2 E1 E2 F1 F2"
+export CHECKPOINT_STEP=6000 EVAL_SEED=1000 EPISODES_PER_TASK=10
+export PRO_DIMENSIONS=object,swap,lan,task PROGRESS=true DRY_RUN=false
+mkdir -p "$EVAL_LOG_ROOT"
+
+nohup bash run_eval_libero_curriculum_seed_repeat_pro.sh run \
+  >> "$EVAL_LOG_ROOT/pro-launch.log" 2>&1 < /dev/null &
+echo "PRO queue PID=$!"
+```
+
+先逐一核查六组最终checkpoint、保存的训练P/D/E/T种子、6000步、batch32和Bocc绑定，再检查PRO资源，全部通过后才启动GPU。GPU0依次D1→F1，GPU1依次D2→F2，GPU2运行E1，GPU3运行E2，每卡同一时间一个模型。四类扰动×四个suite×10任务×10episodes = **1600 episodes/模型，六组9600 episodes**；本次不含env扰动，不是完整五类PRO。
+
+同一终端已导出上述变量时，用原地刷新监控（Ctrl+C只退出监控）：
+
+```bash
+watch -n 10 -t 'bash run_eval_libero_curriculum_seed_repeat_pro.sh status'
+```
+
+模型载入阶段可能暂时没有episode进度；预检阶段显示pending/preflight。新终端查看时应重新设置上述export变量，或使用默认路径和种子并清除遗留的`CELLS/BASE_OUTPUT/EVAL_LOG_ROOT`等覆盖值。
+
+```bash
+bash run_eval_libero_curriculum_seed_repeat_pro.sh summary
+```
+
+输出同原D/E/F格式的suite表及扰动类别表，保存在：
+
+```text
+/data1/wyn/chkpt/2601-lerobot/logs/eval/curriculum-def-seeds-2-3/
+  pro-batch-seed1000-ep10-dimsobject-swap-lan-task/
+    D1.preflight.log / D1.progress.log / D1.result.txt  （其他五组同理）
+    status.json / summary.txt / summary.json
+```
+
+完整逐任务记录在`BASE_OUTPUT/pro/seed1000-ep10-dimsobject-swap-lan-task/`。缺失/部分结果会显示未完成而不是0%；summary在有缺失时返回非零退出码。失败后等旧队列退出，重跑同一启动命令可复用已完成任务；例如`CELLS="F1 F2" GPU_IDS=0,1`只重试两组，汇总六组前恢复完整CELLS。`DRY_RUN=true`仅预检。不要把原A–H入口的CELLS改为D1等标签，它只识别A–H。
