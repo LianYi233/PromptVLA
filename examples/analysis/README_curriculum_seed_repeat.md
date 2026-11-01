@@ -153,3 +153,65 @@ bash run_eval_libero_curriculum_seed_repeat_pro.sh summary
 ```
 
 完整逐任务记录在`BASE_OUTPUT/pro/seed1000-ep10-dimsobject-swap-lan-task/`。缺失/部分结果会显示未完成而不是0%；summary在有缺失时返回非零退出码。失败后等旧队列退出，重跑同一启动命令可复用已完成任务；例如`CELLS="F1 F2" GPU_IDS=0,1`只重试两组，汇总六组前恢复完整CELLS。`DRY_RUN=true`仅预检。不要把原A–H入口的CELLS改为D1等标签，它只识别A–H。
+
+## 同时测标准 LIBERO：六模型、四个 suite
+
+标准LIBERO使用独立入口 `run_eval_libero_curriculum_seed_repeat.sh`，复用历史
+`run_eval_libero-full.sh` 的四suite协议（相机360×360，再由模型处理；spatial上限280步），
+加载完整训练checkpoint和保存的处理器，保持n_action_steps=10、batch1、关闭AMP/compile。
+没有将PRO的224×224相机、spatial220步或扰动任务带进来。
+
+使用之前成功评测**标准LIBERO**的环境（本机为`lerobot`）：
+
+```bash
+conda activate lerobot
+cd /home/wyn/VLAA/PromptVLA
+
+export CKPT_ROOT=/data1/wyn/chkpt/2601-lerobot/PromptVLA
+export LIBERO_OUTPUT_ROOT="$CKPT_ROOT/eval/curriculum-def-seeds-2-3/libero"
+export LIBERO_EVAL_LOG_ROOT=/data1/wyn/chkpt/2601-lerobot/logs/eval/curriculum-def-seeds-2-3/libero
+export TOKENIZER_PATH=/home/wyn/models/paligemma-3b-pt-224
+export SEED_SET_1=2 SEED_SET_2=3
+export GPU_IDS=0,1,2,3 CELLS="D1 D2 E1 E2 F1 F2" JOBS_PER_GPU=2
+export CHECKPOINT_STEP=6000 EVAL_SEED=1000 EPISODES_PER_TASK=10
+export PROGRESS=true DRY_RUN=false
+mkdir -p "$LIBERO_EVAL_LOG_ROOT"
+
+nohup bash run_eval_libero_curriculum_seed_repeat.sh run \
+  >> "$LIBERO_EVAL_LOG_ROOT/launch.log" 2>&1 < /dev/null &
+echo "LIBERO queue PID=$!"
+watch -n 10 -t 'bash run_eval_libero_curriculum_seed_repeat.sh status'
+```
+
+`JOBS_PER_GPU=2`同时启动六组：GPU0=D1+F1，GPU1=D2+F2，GPU2=E1，GPU3=E2。
+若设为1，则GPU0按D1→F1、GPU1按D2→F2依次测试，至多四组同时运行。
+该限制仅作用于本队列，不包含已在运行的PRO评测；若同时跑PRO且显存不足，使用1或先等PRO结束。
+不会停止其他评测。六组共4 suites×10 tasks×10 episodes×6 = **2400 episodes**。
+
+普通stdout只记录最终成功率和队列状态；详细初始化输出、MP4路径等写入full日志，
+独立的progress文件保留episode进度/ETA，watch原地刷新，Ctrl+C只关闭监控。
+开始前串行检查所有模型的训练种子、训练范围和完整checkpoint，`DRY_RUN=true`不启动CUDA。
+
+```bash
+bash run_eval_libero_curriculum_seed_repeat.sh summary
+```
+
+结果及日志：
+
+```text
+/data1/wyn/chkpt/2601-lerobot/logs/eval/curriculum-def-seeds-2-3/libero/
+  libero-batch-seed1000-ep10/
+    summary.txt / summary.json / status.json
+    D1.preflight.log / D1.result.txt / D1.progress.log （其他五组同理）
+    full/ （详细运行日志）
+
+/data1/wyn/chkpt/2601-lerobot/PromptVLA/eval/curriculum-def-seeds-2-3/libero/
+  seed1000-ep10/libero060-all-<模型名>-006000-libero-all4-resume/
+    eval_info.json / task_results/ / resume_manifest.json
+```
+
+标准入口使用`LIBERO_OUTPUT_ROOT`和`LIBERO_EVAL_LOG_ROOT`，不会误用终端遗留的PRO
+`BASE_OUTPUT/EVAL_LOG_ROOT`；也清除PRO/PLUS manifest和benchmark变量。
+标准资源配置默认`/home/wyn/.libero`，可用`STANDARD_LIBERO_CONFIG_PATH`显式设置。
+它不改写该配置、不重装LIBERO、不切换到PRO代码。中断后原命令重新启动可续测已保存任务；
+汇总严格检查40个任务、每任务10个布尔成功记录、checkpoint路径和评估参数，缺失不记作0%。

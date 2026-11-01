@@ -236,7 +236,12 @@ def summary(jobs, batch):
     return not errors
 
 
-def run(jobs, batch):
+def run(jobs, batch, *, entry=None, arguments=("pro", "all"), reader=None, reporter=None, jobs_per_gpu=1):
+    entry = ENTRY if entry is None else entry
+    reader = read_result if reader is None else reader
+    reporter = summary if reporter is None else reporter
+    if type(jobs_per_gpu) is not int or jobs_per_gpu < 1:
+        raise ValueError("jobs_per_gpu must be a positive integer")
     batch.mkdir(parents=True, exist_ok=True)
     with (batch / ".queue.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -247,7 +252,7 @@ def run(jobs, batch):
             print(f"[{cell}] preflight GPU={job['gpu']} {job['name']}", flush=True)
             with (batch / f"{cell}.preflight.log").open("w") as stream:
                 result = subprocess.run(
-                    ["bash", str(ENTRY), "pro", "all"],
+                    ["bash", str(entry), *arguments],
                     cwd=ROOT,
                     env=job["env"] | {"DRY_RUN": "true"},
                     stdout=stream,
@@ -256,9 +261,7 @@ def run(jobs, batch):
             if result.returncode:
                 raise RuntimeError(f"{cell} preflight failed; see {batch / (cell + '.preflight.log')}")
         if jobs[0]["env"]["DRY_RUN"] == "true":
-            print(
-                "All selected checkpoints/resources passed preflight; no GPU evaluation started.", flush=True
-            )
+            print("All selected preflights passed; no GPU evaluation started.", flush=True)
             return True
         status, mutex = {}, threading.Lock()
 
@@ -280,7 +283,7 @@ def run(jobs, batch):
                         (batch / f"{cell}.progress.log").open("a") as err,
                     ):
                         result = subprocess.run(
-                            ["bash", str(ENTRY), "pro", "all"],
+                            ["bash", str(entry), *arguments],
                             cwd=ROOT,
                             env=job["env"] | {"DRY_RUN": "false"},
                             stdout=out,
@@ -289,7 +292,7 @@ def run(jobs, batch):
                         code = result.returncode
                         err.write(f"\n[{cell}] evaluation exit={code}\n")
                     if code == 0:
-                        read_result(job)
+                        reader(job)
                     record(
                         cell,
                         {
@@ -306,12 +309,15 @@ def run(jobs, batch):
                     )
                     print(f"[{cell}] failed: {error}", flush=True)
 
-        queues = [[j for j in jobs if j["gpu"] == gpu] for gpu in dict.fromkeys(j["gpu"] for j in jobs)]
+        queues = []
+        for gpu in dict.fromkeys(j["gpu"] for j in jobs):
+            gpu_jobs = [j for j in jobs if j["gpu"] == gpu]
+            queues.extend(gpu_jobs[lane::jobs_per_gpu] for lane in range(min(jobs_per_gpu, len(gpu_jobs))))
         for job in jobs:
             record(job["cell"], {"state": "pending", "gpu": job["gpu"], "run": job["name"]})
         with ThreadPoolExecutor(max_workers=len(queues)) as pool:
             list(pool.map(worker, queues))
-        complete = summary(jobs, batch)
+        complete = reporter(jobs, batch)
         return complete and all(s["state"] == "completed" for s in status.values())
 
 
