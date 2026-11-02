@@ -28,7 +28,8 @@ from lerobot.utils.pdet_order import (
 
 PROTOCOL = "pi05-gripper-event-long-v1"
 CASES = ("uniform", "event", "uniform_time", "event_time")
-DEFAULT_DIRECTORY = Path("/data1/wyn/prompt-work/gripper-event-long-r1")
+DEFAULT_TASK_ID = 8
+DEFAULT_DIRECTORY = Path("/data1/wyn/prompt-work/gripper-event-long-task8-r1")
 
 # Official task_order_index=0. Match language exactly, never assume that a
 # combined LeRobot dataset's task_index is a LIBERO-long suite task ID.
@@ -94,7 +95,7 @@ def read_tasks(root):
     return tasks
 
 
-def resolve_task(tasks, task_id=0):
+def resolve_task(tasks, task_id=DEFAULT_TASK_ID):
     if type(task_id) is not int or not 0 <= task_id < len(LONG_TASKS):
         raise ValueError("task_id must be a LIBERO-long suite ID in [0, 9]")
     language = canonical_language(LONG_TASKS[task_id])
@@ -393,7 +394,7 @@ def prepare(
     dataset_root,
     output,
     *,
-    task_id=0,
+    task_id=DEFAULT_TASK_ID,
     episode_index=None,
     steps=3000,
     batch_size=32,
@@ -498,7 +499,7 @@ def main():
     prep.add_argument("--dataset-root", type=Path, default=Path("/home/wyn/datasets/libero"))
     prep.add_argument("--output", type=Path, default=DEFAULT_DIRECTORY)
     for name, default in (
-        ("task-id", 0),
+        ("task-id", DEFAULT_TASK_ID),
         ("steps", 3000),
         ("batch-size", 32),
         ("world-size", 2),

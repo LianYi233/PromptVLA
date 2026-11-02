@@ -81,7 +81,7 @@ def dataset(tmp_path):
                 "task_index": [0, 28, 29],
                 "task": [
                     "pick up the alphabet soup and place it in the basket",
-                    experiment.canonical_language(experiment.LONG_TASKS[0]),
+                    experiment.canonical_language(experiment.LONG_TASKS[8]),
                     experiment.canonical_language(experiment.LONG_TASKS[1]),
                 ],
             }
@@ -103,6 +103,8 @@ def selection_for(dataset, **kwargs):
 def test_selection_preserves_full_original_targets_and_chooses_only_one_long_episode(dataset):
     metadata, (selection, starts, weights, near, contains) = selection_for(dataset)
     assert selection["episode_index"] == 2
+    assert selection["task_id"] == 8
+    assert selection["task_name"] == "KITCHEN_SCENE8_put_both_moka_pots_on_the_stove"
     assert selection["task_index"] == 28
     assert selection["closure_frames"] == [20, 70]
     assert starts.tolist() == list(range(240, 311))
@@ -202,7 +204,7 @@ def test_prepare_reuse_check_and_time_variants_share_exact_file(dataset, tmp_pat
         assert settings["time_encoding"] == case.endswith("_time")
         name = experiment.prefix(record, case)
         assert name == experiment.prefix(output, case)
-        assert "task0-ep2-steps30-aexpert" in name
+        assert "task8-ep2-steps30-aexpert" in name
     assert sorted(path.name for path in output.glob("*.npz")) == ["event.npz", "uniform.npz"]
     with pytest.raises(ValueError, match="different inputs"):
         experiment.prepare(root, output, **{**kwargs, "event_weight": 5})

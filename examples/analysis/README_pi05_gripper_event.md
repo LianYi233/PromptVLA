@@ -14,8 +14,9 @@ Transformer 的输入表示中加入相对时间编码是否有额外帮助。
 
 ### 数据范围与动作连续性
 
-- 默认选择官方 `libero_10`（LIBERO-long）任务 0：
-  `put both the alphabet soup and the tomato sauce in the basket`。
+- 默认选择官方 `libero_10`（LIBERO-long）任务 8：
+  `put both moka pots on the stove`（把两个摩卡壶放到炉子上），
+  完整任务名为 `KITCHEN_SCENE8_put_both_moka_pots_on_the_stove`。
 - 在该任务中按 episode index 从小到大选择第一条存在可用闭合事件、且同时包含
   普通起点与事件邻域起点的示范；可用 `--episode-index` 显式指定。
 - 任务根据 `meta/tasks.parquet` 或 `meta/tasks.jsonl` 的精确语言匹配确定。
@@ -122,7 +123,7 @@ export PYTHONPATH="$PWD/src:$PWD${PYTHONPATH:+:$PYTHONPATH}"
 | 模型 | `/home/wyn/models/lerobot/pi05_libero_base` |
 | tokenizer | `/home/wyn/models/paligemma-3b-pt-224` |
 | prompt | `/data1/wyn/prompt-work/pi05_libero_base-vlm2-init-seed1.safetensors` |
-| 准备目录 | `/data1/wyn/prompt-work/gripper-event-long-r1` |
+| 准备目录 | `/data1/wyn/prompt-work/gripper-event-long-task8-r1` |
 | checkpoint 根目录 | `/data1/wyn/chkpt/2601-lerobot/PromptVLA` |
 | 训练日志根目录 | `/data1/wyn/chkpt/2601-lerobot/logs` |
 
@@ -133,10 +134,11 @@ P1 也兼容旧命名 `pi05-base-vlm2-init-seed1.safetensors`；若两个名字�
 ### 第一步：固定一条轨迹和采样计划
 
 ```bash
+export GRIPPER_EVENT_DIR=/data1/wyn/prompt-work/gripper-event-long-task8-r1
 python -m lerobot.scripts.pi05_gripper_event prepare \
   --dataset-root /home/wyn/datasets/libero \
-  --output /data1/wyn/prompt-work/gripper-event-long-r1 \
-  --task-id 0 \
+  --output "$GRIPPER_EVENT_DIR" \
+  --task-id 8 \
   --steps 3000 --batch-size 32 --world-size 2 \
   --window-before 5 --window-after 5 --event-weight 3
 ```
@@ -145,6 +147,8 @@ python -m lerobot.scripts.pi05_gripper_event prepare \
 `episode_index`、`closure_frames` 和采样比例。想固定其他轨迹可增加
 `--episode-index N`；`N` 是完整数据集的 episode index，并非 task 内排序号。
 同一准备目录只允许完全一致的重复准备，修改参数需使用新目录。
+若此前已按旧默认准备了 task 0，使用上面的 task8 目录重新准备；显式导出
+`GRIPPER_EVENT_DIR` 后，训练、评测和汇总都会使用新的 task8 清单。
 
 所有帧索引保留完整数据集的 global index；训练只使用计划引用的那一条 episode。
 不要额外传 `dataset.episodes` 或重编号，否则会破坏计划和 dataset 的索引对应。
@@ -199,7 +203,7 @@ GPU 上依次评测。保持 checkpoint 中的时间编码设置，执行步数�
 
 ```text
 /data1/wyn/chkpt/2601-lerobot/PromptVLA/eval/gripper-event/
-  task0-ep<episode>-<manifest_hash>/r1-seed1000-n10/
+  task8-ep<episode>-<manifest_hash>/r1-seed1000-n10/
     summary-all.json
     summary-all.csv
     libero060-all-<run_name>-003000-libero_10-resume/eval_info.json

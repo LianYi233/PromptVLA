@@ -41,7 +41,7 @@ def prepared(tmp_path):
             root / "data/data.parquet",
         )
         pq.write_table(
-            pa.table({"task_index": [0, 7], "task": ["another suite task", sampling.LONG_TASKS[0]]}),
+            pa.table({"task_index": [0, 7], "task": ["another suite task", sampling.LONG_TASKS[8]]}),
             root / "meta/tasks.parquet",
         )
         (root / "meta/info.json").write_text(json.dumps({"fps": 10, "total_frames": 160}))
@@ -125,7 +125,7 @@ def test_build_jobs_shares_plan_for_time_controls_and_has_distinct_outputs(prepa
     assert jobs[0]["plan"] == jobs[2]["plan"]
     assert jobs[1]["plan"] == jobs[3]["plan"]
     assert len({job["run"] for job in jobs}) == 4
-    assert all("task0-ep1" in job["name"] for job in jobs)
+    assert all("task8-ep1" in job["name"] for job in jobs)
     assert record["selection"]["task_index"] == 7
 
 
@@ -174,7 +174,7 @@ def test_report_distinguishes_training_task_and_long_overall(prepared, tmp_path)
     jobs = experiment.build_jobs(record, directory, args.output_root)
     for i, job in enumerate(jobs):
         info = eval_payload(success_count=1)
-        info["per_task"][0]["metrics"]["successes"] = [i >= 1, i >= 2]
+        info["per_task"][8]["metrics"]["successes"] = [i >= 1, i >= 2]
         path = experiment.result_path(job, record, args)
         path.parent.mkdir(parents=True)
         path.write_text(json.dumps(info))

@@ -427,7 +427,7 @@ def main():
     parser.add_argument(
         "--directory",
         type=Path,
-        default=os.environ.get("GRIPPER_EVENT_DIR", "/data1/wyn/prompt-work/gripper-event-long-r1"),
+        default=os.environ.get("GRIPPER_EVENT_DIR", "/data1/wyn/prompt-work/gripper-event-long-task8-r1"),
     )
     parser.add_argument("--repeat", type=int, default=int(os.environ.get("REPEAT_ID", "1")))
     parser.add_argument(
