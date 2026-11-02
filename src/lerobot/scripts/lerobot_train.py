@@ -633,6 +633,49 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         accelerator.end_training()
 
 
+def _initialize_wandb_logger(
+    cfg: TrainPipelineConfig,
+    accelerator: "Accelerator",
+) -> "WandBLogger | None":
+    """Initialize on the global main rank, then agree on success before proceeding.
+
+    Every rank must enter this helper with the same configuration. Otherwise a
+    main-rank SDK exception can leave peers waiting in a later dataset/model
+    collective until the process-group timeout. Keep the original exception on
+    main; peers report its origin instead of entering another startup collective.
+    """
+    enabled = (
+        cfg.wandb.enable
+        and cfg.wandb.project
+        and getattr(cfg.wandb, "mode", "online") != "disabled"
+        and cfg.vlm_prompt_export_path is None
+    )
+    if not enabled:
+        if accelerator.is_main_process:
+            logging.info(colored("Logs will be saved locally.", "yellow", attrs=["bold"]))
+        return None
+
+    logger, error = None, None
+    if accelerator.is_main_process:
+        try:
+            logger = WandBLogger(cfg)
+        except Exception as exc:
+            error = exc
+
+    failed = error is not None
+    if accelerator.num_processes > 1:
+        failures = accelerator.reduce(torch.tensor(int(failed), device=accelerator.device), reduction="sum")
+        failed = bool(failures.item())
+    if failed:
+        if error is not None:
+            raise error
+        raise RuntimeError(
+            "W&B initialization failed on the main process; see its original traceback. "
+            "All ranks are stopping before dataset/model setup."
+        )
+    return logger
+
+
 def _train_single_stage(
     cfg: TrainPipelineConfig,
     accelerator: "Accelerator",
@@ -654,13 +697,8 @@ def _train_single_stage(
     if is_main_process:
         logging.info(pformat(cfg.to_dict()))
 
-    # Initialize wandb only on main process
-    if cfg.wandb.enable and cfg.wandb.project and is_main_process and cfg.vlm_prompt_export_path is None:
-        wandb_logger = WandBLogger(cfg)
-    else:
-        wandb_logger = None
-        if is_main_process:
-            logging.info(colored("Logs will be saved locally.", "yellow", attrs=["bold"]))
+    # All ranks agree on logging startup before any dataset/model collectives.
+    wandb_logger = _initialize_wandb_logger(cfg, accelerator)
 
     if cfg.seed is not None:
         set_seed(cfg.seed, accelerator=accelerator)

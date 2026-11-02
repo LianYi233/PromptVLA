@@ -113,7 +113,13 @@ python -m pip install --no-deps -e .
 export PYTHONPATH="$PWD/src:$PWD${PYTHONPATH:+:$PYTHONPATH}"
 ```
 
-如果本地已经有该分支，使用 `git switch feat/gripper-event-time-long`。
+如果本地已经有该分支，把上面的 `git switch -c ...` 替换为以下两条命令，
+切换后快进到刚刚 fetch 的版本：
+
+```bash
+git switch feat/gripper-event-time-long
+git merge --ff-only FETCH_HEAD
+```
 
 默认路径沿用当前仓库：
 
@@ -174,6 +180,41 @@ bash examples/training/train_pi05_gripper_event.sh event
 
 `--wandb-mode offline` 或 `--wandb-mode disabled` 可用于无法访问 W&B 的环境。
 `--gpus 2,3 --port 29590` 可以把**整组双卡实验**放到另外两张 GPU。
+
+### W&B 初始化失败后重跑
+
+若日志在 `WandBLogger` → `wandb.init` 处显示 `403 Forbidden`，说明在线创建 W&B
+run 失败。该阶段早于数据集、模型构造和 optimizer 更新；其他 rank 后续出现的
+NCCL 超时可能是主进程失败后未继续同步的结果。训练入口会协调传播 W&B 初始化
+异常，让所有 rank 退出并保留原始错误，而不会自动更改日志模式。
+
+需要保留可在以后上传的 W&B 指标时，显式使用 `--wandb-mode offline`。本实验
+wrapper 显式传入 W&B mode，因此不要只设置 `WANDB_MODE` 环境变量。
+初始化失败仍可能留下输出目录和 `runs/<run_name>.json` 注册记录；改日志模式后
+应使用新的 `--repeat` 编号，保留旧记录，无需重新 prepare：
+
+```bash
+DRY_RUN=false GPU_IDS=0,1 \
+bash examples/training/train_pi05_gripper_event.sh all \
+  --directory /data1/wyn/prompt-work/gripper-event-long-task8-r1 \
+  --repeat 2 --wandb-mode offline
+```
+
+若希望完全跳过 W&B SDK 初始化，将最后的 `offline` 改为 `disabled`。这时仍保留
+终端/文件训练日志、`training_diagnostics.jsonl`、PDET 审计和 checkpoint，但不生成
+可供之后同步的 W&B run。`--repeat 2` 只改变 run 名称；继续使用原 task8 episode、
+采样计划、随机种子和训练预算。若编号 2 已被使用，选另一个未使用的正整数。
+
+训练完成后，评测和汇总需要使用同一编号：
+
+```bash
+GPU_ID=0 bash run_eval_libero_gripper_event.sh all \
+  --directory /data1/wyn/prompt-work/gripper-event-long-task8-r1 --repeat 2
+python -m lerobot.scripts.pi05_gripper_event_experiment summarize all \
+  --directory /data1/wyn/prompt-work/gripper-event-long-task8-r1 --repeat 2
+```
+
+### P1 初始化（仅在文件不存在时）
 
 如 P1 文件尚不存在，先用已有初始化导出入口创建，零次训练更新：
 
