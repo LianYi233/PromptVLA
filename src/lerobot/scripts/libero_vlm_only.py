@@ -207,6 +207,17 @@ def validate_checkpoint(
             ):
                 if not any(key.startswith(prefix) for key in keys):
                     raise ValueError(f"Missing trained action network weights: {prefix}")
+        time_key = "model.action_time_encoder.weight"
+        if config.get("action_time_encoding", False):
+            if not train_action_expert:
+                raise ValueError("Relative action time encoding requires full action expert adaptation")
+            time_dim = config.get("action_time_encoding_dim", 32)
+            if type(time_dim) is not int or time_dim < 2 or time_dim % 2:
+                raise ValueError("Invalid relative action time encoding dimension")
+            if time_key not in keys or weights.get_slice(time_key).get_shape() != [1024, time_dim]:
+                raise ValueError(f"Missing/invalid relative action time weights: {time_key}")
+        elif time_key in keys:
+            raise ValueError("Relative action time weights present with encoding disabled")
     validate_processors(directory, config)
     if source:
         training = read_json(directory / "train_config.json")

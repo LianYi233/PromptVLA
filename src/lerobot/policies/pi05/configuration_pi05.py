@@ -76,6 +76,13 @@ class PI05Config(PreTrainedConfig):
     chunk_size: int = 50  # Number of action steps to predict, in openpi called "action_horizon"
     n_action_steps: int = 50  # Number of action steps to execute
 
+    # Optional physical offsets j / fps on the action input embeddings. This is
+    # separate from flow-matching time and adds no dimensions to action labels.
+    # Restrict the experiment to full expert adaptation to preserve prompt-only budgets.
+    action_time_encoding: bool = False
+    action_time_encoding_dim: int = 32
+    action_time_encoding_fps: float = 20.0
+
     # Training stage. The default freezes both backbones; full expert adaptation is flow-only.
     # ``next_action`` is kept as the public name for
     # backwards compatibility; its base objective is action-only flow inpainting over the chunk.
@@ -198,6 +205,23 @@ class PI05Config(PreTrainedConfig):
         # Legacy flags cannot unfreeze a backbone; action adaptation has explicit opt-ins above.
         self.freeze_vision_encoder = True
         self.train_expert_only = True
+        if not isinstance(self.action_time_encoding, bool):
+            raise ValueError("action_time_encoding must be a boolean")
+        if (
+            isinstance(self.action_time_encoding_dim, bool)
+            or not isinstance(self.action_time_encoding_dim, int)
+            or self.action_time_encoding_dim < 2
+            or self.action_time_encoding_dim % 2
+        ):
+            raise ValueError("action_time_encoding_dim must be an even integer of at least 2")
+        if (
+            isinstance(self.action_time_encoding_fps, bool)
+            or not math.isfinite(self.action_time_encoding_fps)
+            or self.action_time_encoding_fps <= 0
+        ):
+            raise ValueError("action_time_encoding_fps must be finite and positive")
+        if self.action_time_encoding and not self.train_action_expert:
+            raise ValueError("action_time_encoding requires train_action_expert=True")
         if self.freeze_vlm_prompt and not self.train_action_expert:
             raise ValueError("freeze_vlm_prompt requires train_action_expert=True")
         if self.train_action_expert and (

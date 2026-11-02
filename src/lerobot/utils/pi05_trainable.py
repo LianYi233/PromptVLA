@@ -28,6 +28,8 @@ def validate_vlm_trainables(policy):
                 model.time_mlp_out,
             ]
         )
+        if getattr(model, "action_time_encoder", None) is not None:
+            modules.append(model.action_time_encoder)
     expected = {id(p) for module in modules for p in module.parameters() if p.numel()}
     actual = {id(p) for p in policy.parameters() if p.requires_grad}
     if expected != actual or model.vlm_prompt_tokens.weight.requires_grad == frozen_prompt:

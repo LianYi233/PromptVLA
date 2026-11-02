@@ -16,6 +16,7 @@
 
 import builtins
 import copy
+import json
 import logging
 import math
 from collections import deque
@@ -58,6 +59,7 @@ from lerobot.optim.cabo import (
     require_adamw,
     validate_adamw_param_group,
 )
+from lerobot.policies.pi05.action_time import RelativeActionTimeEncoding
 from lerobot.policies.pi05.attention_pi05 import pi05_attention_forward
 from lerobot.policies.pi05.configuration_pi05 import (
     DEFAULT_IMAGE_SIZE,
@@ -771,6 +773,16 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         self.time_mlp_in = nn.Linear(action_expert_config.width, action_expert_config.width)
         self.time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
 
+        self.action_time_encoder = (
+            RelativeActionTimeEncoding(
+                action_expert_config.width,
+                config.action_time_encoding_dim,
+                config.action_time_encoding_fps,
+            )
+            if config.action_time_encoding
+            else None
+        )
+
         # Persist the former inpainting role signal so Stage-1 and Stage-2 state dicts remain identical.
         # It stays zero and frozen for checkpoint compatibility; visible actions remain clean while
         # masked actions follow the sampled flow path.
@@ -817,6 +829,8 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             trainable_modules.extend(
                 [self.paligemma_with_expert.gemma_expert.model, self.time_mlp_in, self.time_mlp_out]
             )
+            if getattr(self, "action_time_encoder", None) is not None:
+                trainable_modules.append(self.action_time_encoder)
         for module in trainable_modules:
             modules_to_save = getattr(module, "modules_to_save", None)
             if modules_to_save is None:
@@ -982,6 +996,10 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             return self.action_in_proj(noisy_actions)
 
         action_emb = self._apply_checkpoint(action_proj_func, noisy_actions)
+        # This path is shared by flow-matching training and every inference
+        # denoising step. Only the chunk-relative physical clock enters here.
+        if getattr(self, "action_time_encoder", None) is not None:
+            action_emb = self.action_time_encoder(action_emb)
 
         def time_mlp_func(time_emb):
             x = self.time_mlp_in(time_emb)
@@ -1550,6 +1568,29 @@ class PI05Policy(PreTrainedPolicy):
                     remapped_state_dict[prompt_key] = model.state_dict()[prompt_key]
                     logging.info("Initialized %s absent from the PI05 checkpoint", prompt_key)
 
+            action_time_key = "model.action_time_encoder.weight"
+            if model.config.action_time_encoding and action_time_key not in remapped_state_dict:
+                # A base model can seed the optional zero residual. An enabled
+                # checkpoint missing its learned tensor is corrupt, even when
+                # strict=False; never silently erase a learned time conditioner.
+                source_config_file = cached_file(
+                    pretrained_name_or_path,
+                    "config.json",
+                    cache_dir=cache_dir,
+                    force_download=force_download,
+                    resume_download=resume_download,
+                    proxies=proxies,
+                    token=token,
+                    revision=revision,
+                    local_files_only=local_files_only,
+                )
+                with open(source_config_file) as source_file:
+                    source_config = json.load(source_file)
+                if source_config.get("action_time_encoding", False):
+                    raise RuntimeError("Enabled action_time_encoding checkpoint is missing its weight")
+                remapped_state_dict[action_time_key] = model.state_dict()[action_time_key]
+                logging.info("Initialized zero relative-time projection absent from the source checkpoint")
+
             # Inpainting and formal flow deliberately use an identical parameter set. Loading stays
             # strict across stages so no action-flow head can be silently dropped or reinitialized.
             missing_keys, unexpected_keys = model.load_state_dict(remapped_state_dict, strict=False)
@@ -1660,22 +1701,21 @@ class PI05Policy(PreTrainedPolicy):
         return [self.model.paligemma_with_expert.gemma_expert]
 
     def _action_projection_modules(self) -> list[nn.Module]:
-        return [
+        modules = [
             self.model.action_in_proj,
             self.model.action_out_proj,
             self.model.time_mlp_in,
             self.model.time_mlp_out,
             self.model.inpainting_visible_action_embedding,
         ]
+        if getattr(self.model, "action_time_encoder", None) is not None:
+            modules.append(self.model.action_time_encoder)
+        return modules
 
     def _action_modules(self) -> list[nn.Module]:
         return [
             self.model.paligemma_with_expert.gemma_expert,
-            self.model.action_in_proj,
-            self.model.action_out_proj,
-            self.model.time_mlp_in,
-            self.model.time_mlp_out,
-            self.model.inpainting_visible_action_embedding,
+            *PI05Policy._action_projection_modules(self),
         ]
 
     def _is_cabo_active(self) -> bool:

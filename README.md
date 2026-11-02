@@ -38,6 +38,8 @@ D/E/F 新种子重复：见 [D1/E1/F1、D2/E2/F2 一次启动说明](examples/an
 
 两样本顺序对照：见 [同一对简单/困难观测，交换两个3000步阶段](examples/analysis/README_pi05_two_frame.md)。复用评分缓存，选同 task/episode 的两个完整、不重叠动作窗口；E2H/H2E 各训练6000步、曝光各半，固定帧与噪声配对，仅训练VLM2+完整action expert。四卡并行两组，记录两个训练样本各自的固定损失，只保存最终006000。
 
+LIBERO-long 单示范夹爪实验：见 [闭合邻域采样 × 动作相对时间编码四组对照](examples/analysis/README_pi05_gripper_event.md)。从 long 的一个任务选择一条完整 episode，只改变连续50步 action chunk 起点的抽样概率；均匀/事件采样各做时间编码开关对照，VLM2+完整action expert、每组双卡×batch32、默认3000步，仅在标准 `libero_10` 评测，同时报告训练任务和十任务总体结果。新时间结构默认关闭，旧实验保持兼容。
+
 LIBERO-PRO / PLUS 泛化评估：见 [完整动作网络checkpoint的独立基准入口](examples/analysis/README_libero_robustness.md)。`run_eval_libero_robustness.sh` 校验并选择指定fork，加载保存的VLM2+action expert及处理器，支持任务级恢复、单行进度、按扰动类别汇总；PLUS严格检查10030个变体，PRO可明确选择已备齐资源的维度，不把部分评测标成全量。
 
 ## Project and implementation
