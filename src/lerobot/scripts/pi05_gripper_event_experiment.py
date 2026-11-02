@@ -52,8 +52,20 @@ def source_identity(source):
     }
 
 
+def preparation_module(record):
+    """Route saved preparation protocols without changing legacy r1/r2 runs."""
+    if record.get("protocol") == "pi05-gripper-additive-long-v1":
+        from lerobot.scripts import pi05_gripper_additive as module
+    elif record.get("protocol") == "pi05-gripper-event-long-v1":
+        from lerobot.scripts import pi05_gripper_event as module
+    else:
+        raise ValueError("Unrecognized gripper experiment preparation protocol")
+    return module
+
+
 def build_jobs(record, directory, output_root, selection="all", repeat=1):
-    from lerobot.scripts.pi05_gripper_event import case_config, prefix
+    module = preparation_module(record)
+    case_config, prefix = module.case_config, module.prefix
 
     if selection not in (*CASES, "all") or type(repeat) is not int or repeat < 1:
         raise ValueError("Choose a known case and a positive repeat identifier")
@@ -173,7 +185,11 @@ def train(record, jobs, args):
         if source_identity(args.source) != source or file_hash(prompt) != prompt_digest:
             raise ValueError("Source or imported prompt changed between experimental conditions")
         descriptor = {
-            "protocol": PROTOCOL,
+            "protocol": (
+                "pi05-gripper-additive-experiment-v1"
+                if record["protocol"] == "pi05-gripper-additive-long-v1"
+                else PROTOCOL
+            ),
             "case": job["case"],
             "name": job["name"],
             "preparation": record,
@@ -460,7 +476,11 @@ def main():
     parser.add_argument("--gpu", type=int, default=int(os.environ.get("GPU_ID", "0")))
     parser.add_argument("--port", type=int, default=int(os.environ.get("MAIN_PROCESS_PORT", "29589")))
     parser.add_argument("--num-workers", type=int, default=4)
-    parser.add_argument("--wandb-mode", choices=("online", "offline", "disabled"), default="online")
+    parser.add_argument(
+        "--wandb-mode",
+        choices=("online", "offline", "disabled"),
+        default=os.environ.get("GRIPPER_EXPERIMENT_DEFAULT_WANDB_MODE", "online"),
+    )
     parser.add_argument("--eval-root", type=Path, default=os.environ.get("BASE_OUTPUT"))
     parser.add_argument("--eval-seed", type=int, default=int(os.environ.get("EVAL_SEED", "1000")))
     parser.add_argument("--episodes", type=int, default=int(os.environ.get("EPISODES_PER_TASK", "10")))
@@ -471,9 +491,7 @@ def main():
     try:
         if args.repeat < 1 or args.episodes < 1 or args.eval_seed < 0 or args.gpu < 0:
             raise ValueError("Invalid repeat, episodes, evaluation seed, or GPU")
-        from lerobot.scripts.pi05_gripper_event import check
-
-        record = check(args.directory)
+        record = preparation_module(read_json(args.directory / "manifest.json")).check(args.directory)
         jobs = build_jobs(record, args.directory, args.output_root, args.case, args.repeat)
         if args.command == "train":
             train(record, jobs, args)
