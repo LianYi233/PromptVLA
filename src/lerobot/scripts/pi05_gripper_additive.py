@@ -164,7 +164,10 @@ def make_additive_plan(
             "slot_schedule_sha256": arrays_hash({"slot_is_extra": slots.astype(np.int64)}),
             "additional_pool_size": int(len(pool)),
         },
-        "scope": "Original uniform occurrences retained in-order; extra full contiguous chunks in separate interleaved updates",
+        "scope": (
+            "Original uniform occurrences retained in-order; "
+            "extra full contiguous chunks in separate interleaved updates"
+        ),
     }
     return {**arrays, "manifest": manifest}, slots
 

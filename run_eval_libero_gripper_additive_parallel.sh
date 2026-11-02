@@ -9,6 +9,14 @@ if [[ "${#gpus[@]}" -ne 4 ]]; then
   echo "Need four GPU IDs via GPU_IDS=0,1,2,3" >&2
   exit 2
 fi
+declare -A used_gpus=()
+for gpu in "${gpus[@]}"; do
+  if [[ ! "$gpu" =~ ^[0-9]+$ || -n "${used_gpus[$gpu]+x}" ]]; then
+    echo "GPU IDs must be four distinct nonnegative integers" >&2
+    exit 2
+  fi
+  used_gpus[$gpu]=1
+done
 declare -a cases=(uniform event uniform_time event_time)
 declare -a pids=()
 mkdir -p "$LOG_ROOT"
