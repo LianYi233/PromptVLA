@@ -19,7 +19,6 @@ import numpy as np
 from lerobot.scripts.frameskip_scores import read_actions
 from lerobot.scripts.pi05_gripper_event import (
     CASES,
-    LONG_TASKS,
     _inventory,
     case_config,
     read_tasks,
@@ -228,7 +227,7 @@ def _build(dataset_root, base_plan_path, settings):
         "sampling_summary": {},
     }
 
-    plans, counts, rows_by_sampling = {}, {}, {}
+    plans, counts = {}, {}
     for sampling in ("uniform", "event"):
         plan, actual_slots = make_additive_plan(
             metadata, base_indices, candidates, event_mask, selection,
@@ -250,7 +249,6 @@ def _build(dataset_root, base_plan_path, settings):
         candidates_pos = np.searchsorted(candidates, plan["index"])
         extra_pos = np.searchsorted(candidates, extras)
         counts[sampling] = np.bincount(extra_pos, minlength=len(candidates))
-        rows_by_sampling[sampling] = plan
         record["plans"][sampling] = plan["manifest"]
         record["sampling_summary"][sampling] = {
             "base_steps_unchanged": settings["base_steps"],
