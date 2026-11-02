@@ -122,6 +122,18 @@ export PYOPENGL_PLATFORM=egl
 unset MUJOCO_EGL_DEVICE_ID || true
 export LIBERO_CONFIG_PATH="${LIBERO_CONFIG_PATH:-/home/wyn/.libero}"
 export PYTHONUNBUFFERED=1
+# Opt-in observation-only Gaussian noise. The standard LIBERO-long suite is
+# required; do not silently mix the robustness forks or other suites.
+if [[ -n "${LIBERO_FIXED_NOISE_CONFIG:-}" ]]; then
+  if [[ "$ENV_TYPE" != libero || "$TASKS" != libero_10 || -n "${LIBERO_ROBUSTNESS_MANIFEST:-}" ]]; then
+    echo "Fixed image noise requires standard libero_10, without PLUS/PRO overrides" >&2
+    exit 2
+  fi
+  if [[ "$DRY_RUN" != true && ! -f "$LIBERO_FIXED_NOISE_CONFIG" ]]; then
+    echo "Fixed image noise config missing: $LIBERO_FIXED_NOISE_CONFIG" >&2
+    exit 2
+  fi
+fi
 
 CKPT_ROOT="${CKPT_ROOT:-${DEFAULT_CKPT_ROOT}}"
 # Explicit BASE_CKPT overrides automatic checkpoint discovery only.
@@ -225,6 +237,9 @@ PY
     echo "model=$RUN_NAME training_seed=$TRAINING_SEED_LABEL CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
     echo "output_dir=$OUTPUT_DIR"
     echo "log=$LOG"
+    if [[ -n "${LIBERO_FIXED_NOISE_CONFIG:-}" ]]; then
+      echo "fixed_image_noise_config=$LIBERO_FIXED_NOISE_CONFIG"
+    fi
     printf '%q ' python -u - "${EVAL_ARGS[@]}"
     printf '\n'
     continue
@@ -304,6 +319,12 @@ attention_manifest = {}
 if os.environ.get("LEROBOT_EVAL_ATTENTION") == "1":
     from lerobot.scripts.libero_attention import install_attention_evaluation, require_saved_attention_videos
     attention_manifest = install_attention_evaluation(module)
+fixed_noise_manifest = {}
+if os.environ.get("LIBERO_FIXED_NOISE_CONFIG"):
+    if os.environ.get("LIBERO_ROBUSTNESS_MANIFEST"):
+        raise RuntimeError("Fixed Gaussian image noise is incompatible with PLUS/PRO evaluation")
+    from lerobot.scripts.libero_fixed_noise import install as install_fixed_noise
+    fixed_noise_manifest = install_fixed_noise(module, os.environ["LIBERO_FIXED_NOISE_CONFIG"])
 original_all = module.eval_policy_all
 original_one = module.run_one
 original_rollout = module.rollout
@@ -340,6 +361,7 @@ manifest = {
     **attention_manifest,
     **base_manifest,
     **robustness_manifest,
+    **fixed_noise_manifest,
 }
 manifest_file = output / "resume_manifest.json"
 if manifest_file.exists():

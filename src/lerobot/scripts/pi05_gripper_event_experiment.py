@@ -9,6 +9,7 @@ import argparse
 import csv
 import hashlib
 import json
+import math
 import os
 import subprocess
 from pathlib import Path
@@ -299,8 +300,58 @@ def audit(record, jobs):
     return result
 
 
+def fixed_noise_config(args):
+    """A single immutable corruption protocol shared across all evaluation cases."""
+    from lerobot.scripts.libero_fixed_noise import PROTOCOL, validate_config
+
+    std = getattr(args, "noise_std", 0.0)
+    if type(std) not in (int, float) or not math.isfinite(std) or not 0 <= std <= 1:
+        raise ValueError("--noise-std must be finite and in [0,1]")
+    # Legacy direct evaluation is unchanged at std=0. Additive launchers
+    # enable the fixed protocol even at zero std: this gives a clean control
+    # with the same deterministic per-episode policy RNG as noisy evaluation.
+    matched_clean = getattr(args, "fixed_eval", False)
+    if std == 0 and not matched_clean:
+        return None
+    return validate_config(
+        {
+            "protocol": PROTOCOL,
+            "kind": "gaussian",
+            "std": float(std),
+            "seed": getattr(args, "noise_seed", 20261102),
+            "scope": getattr(args, "noise_scope", "task8"),
+            "eval_seed": args.eval_seed,
+            "suite": "libero_10",
+            "target_task_id": 8,
+        }
+    )
+
+
+def fixed_noise_path(args, record):
+    return evaluation_root(args, record) / "fixed_image_noise_config.json"
+
+
+def ensure_noise_config(path, config):
+    """Serialize shared protocol creation under a filesystem lock (four GPUs)."""
+    import fcntl
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with (path.parent / ".fixed_image_noise.lock").open("a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        save_record(path, config)
+
+
 def evaluation_root(args, record):
     base = args.eval_root or args.output_root / "eval" / "gripper-event"
+    noise = fixed_noise_config(args)
+    if noise:
+        fingerprint = hashlib.sha256(json.dumps(noise, sort_keys=True).encode()).hexdigest()[:12]
+        sigma_label = str(noise["std"]).replace(".", "p")
+        base = (
+            Path(base) / "fixed-image-noise"
+            / f"scope-{noise['scope']}-sigma-{sigma_label}-seed{noise['seed']}-{fingerprint}"
+        )
     selection = record["selection"]
     identity = hashlib.sha256(json.dumps(record, sort_keys=True).encode()).hexdigest()[:12]
     experiment_name = f"task{selection['task_id']}-ep{selection['episode_index']}-{identity}"
@@ -321,9 +372,24 @@ def evaluate(record, jobs, args):
     if os.environ.get("LIBERO_ROBUSTNESS_MANIFEST") or os.environ.get("LIBERO_BENCHMARK"):
         raise ValueError("Unset LIBERO_ROBUSTNESS_MANIFEST/LIBERO_BENCHMARK for standard LIBERO-long")
     audit(record, jobs)
+    noise_spec = fixed_noise_config(args)
+    noise_path = fixed_noise_path(args, record) if noise_spec else None
+    if noise_spec and not args.dry_run:
+        ensure_noise_config(noise_path, noise_spec)
+    if noise_spec:
+        print(
+            f"Fixed Gaussian image noise: scope={noise_spec['scope']} "
+            f"std={noise_spec['std']} seed={noise_spec['seed']} "
+            f"eval_seed={noise_spec['eval_seed']} config={noise_path}",
+            flush=True,
+        )
     commands = []
     for job in jobs:
         env = os.environ.copy()
+        # Never reuse a stale noise protocol inherited from another evaluation.
+        env.pop("LIBERO_FIXED_NOISE_CONFIG", None)
+        if noise_path:
+            env["LIBERO_FIXED_NOISE_CONFIG"] = str(noise_path)
         for key in ("BASE_CKPT", "BASE_MODEL_PATH", "RUN_PREFIX", "PDET_CASES"):
             env.pop(key, None)
         descriptor = read_json(job["run"] / "gripper_event_experiment.json")
@@ -385,14 +451,30 @@ def read_eval_result(path, selected_task, episodes):
 
 
 def summarize(record, jobs, args):
+    noise_spec = fixed_noise_config(args)
     results = {}
+    corruption_identities = set()
     for job in jobs:
         path = result_path(job, record, args)
+        if noise_spec:
+            metadata = read_json(path.parent / "resume_manifest.json")
+            applied = metadata.get("fixed_observation_noise", {})
+            expected_file = fixed_noise_path(args, record)
+            if (
+                applied.get("config") != noise_spec
+                or applied.get("config_sha256") != file_hash(expected_file)
+            ):
+                raise ValueError("Evaluated image-noise protocol differs from requested fixed settings")
+            corruption_identities.add(
+                (applied.get("config_sha256"), applied.get("helper_sha256"))
+            )
         results[job["case"]] = {
             **read_eval_result(path, record["selection"]["task_id"], args.episodes),
             "eval_info": str(path),
             "checkpoint": str(job["checkpoint"]),
         }
+    if len(corruption_identities) > 1:
+        raise ValueError("Models were evaluated with different noise protocols or implementations")
     contrasts = {}
     if set(results) == set(CASES):
         for metric in ("selected_task_rate", "overall_rate"):
@@ -408,6 +490,14 @@ def summarize(record, jobs, args):
         "selection": record["selection"],
         "eval_seed": args.eval_seed,
         "episodes_per_task": args.episodes,
+        "fixed_observation_noise": noise_spec,
+        "success_rate_scope": (
+            "all ten tasks clean; deterministic per-episode policy RNG"
+            if noise_spec and noise_spec["std"] == 0
+            else "task8 corrupted; other nine tasks clean"
+            if noise_spec and noise_spec["scope"] == "task8"
+            else "all ten tasks corrupted" if noise_spec else "all ten tasks clean"
+        ),
         "results": results,
         "contrasts": contrasts,
         "scope": "One-demonstration adaptation diagnostic; not a full-dataset or unseen-task generalization claim.",
@@ -484,6 +574,28 @@ def main():
     parser.add_argument("--eval-root", type=Path, default=os.environ.get("BASE_OUTPUT"))
     parser.add_argument("--eval-seed", type=int, default=int(os.environ.get("EVAL_SEED", "1000")))
     parser.add_argument("--episodes", type=int, default=int(os.environ.get("EPISODES_PER_TASK", "10")))
+    parser.add_argument(
+        "--fixed-eval",
+        action="store_true",
+        default=os.environ.get("GRIPPER_FIXED_EVAL", "false").lower() == "true",
+        help="Use matched per-episode policy seeding even if --noise-std=0",
+    )
+    parser.add_argument(
+        "--noise-std",
+        type=float,
+        default=float(os.environ.get("GRIPPER_FIXED_NOISE_STD", "0")),
+        help="Gaussian observation RGB std in [0,1]; zero keeps the clean benchmark",
+    )
+    parser.add_argument(
+        "--noise-seed",
+        type=int,
+        default=int(os.environ.get("GRIPPER_FIXED_NOISE_SEED", "20261102")),
+    )
+    parser.add_argument(
+        "--noise-scope",
+        choices=("task8", "all"),
+        default=os.environ.get("GRIPPER_FIXED_NOISE_SCOPE", "task8"),
+    )
     parser.add_argument(
         "--dry-run", action="store_true", default=os.environ.get("DRY_RUN", "false") == "true"
     )

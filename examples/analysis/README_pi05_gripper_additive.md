@@ -129,31 +129,102 @@ If only one case is interrupted, rerun that case with a new --repeat label.
 For a four-way factorial comparison, all four cases should use the same
 repeat label. --repeat is a run identifier, NOT a new random seed.
 
-## 4. Evaluation: same standard LIBERO-long / libero_10
+## 4. Evaluation: deterministic Gaussian RGB perturbation
 
-To run 4 GPUs in parallel (one case per GPU), use:
+This experiment now defaults to a **fixed, model-independent image-noise
+protocol** when using the `run_eval_libero_gripper_additive*.sh` launchers:
+
+- Default noise: additive independent-pixel Gaussian, sigma=0.10 on images
+  normalized to [0,1], with clipping to [0,1].
+- Default scope: task8 ONLY (both agentview and wrist cameras). The other
+  nine LIBERO-long tasks remain clean. The overall 10-task score therefore
+  combines 1 noisy task + 9 clean tasks; use `--noise-scope all` for a
+  uniformly perturbed ten-task benchmark.
+- Default noise seed: 20261102; evaluation start seed: 1000.
+- Noise is generated independently for every *suite, task, episode seed,
+  observation step, camera*, with SHA256-derived NumPy PCG64 seeds. It does
+  not depend on the case, model weights, GPU ID, or order of completed tasks.
+- The same noise realization is therefore used at the same episode/time
+  index/camera for all four models. Different model actions can produce
+  different clean scene images; common noise does not make trajectories equal.
+- The model's torch random stream is also seeded per episode using an
+  independent deterministic key, **including when sigma=0 in this launcher**.
+  This improves comparability when task durations differ or task-level
+  resume skips finished tasks. Physics may still exhibit
+  hardware-specific nondeterminism.
+- Corruption is applied **after** the LIBERO flip, **before** the saved policy
+  preprocessing. Robot states, task language, actions, simulation state and
+  checkpoint parameters are not changed. No train-time noise is added.
+- The JSON protocol is saved under the separate noisy-evaluation directory
+  as `fixed_image_noise_config.json`. All four rollout resume manifests
+  contain its SHA256 and the corruption helper code hash. A changed protocol
+  cannot resume into old results.
+
+Run four models in parallel (one checkpoint per GPU) with explicit settings:
+
+    DRY_RUN=true GPU_IDS=0,1,2,3 \
+      bash run_eval_libero_gripper_additive_parallel.sh \
+        --directory /data1/wyn/prompt-work/gripper-event-additive-task8-r1 \
+        --repeat 1 --eval-seed 1000 --episodes 30 \
+        --noise-std 0.10 --noise-seed 20261102 --noise-scope task8
+
+    DRY_RUN=false GPU_IDS=0,1,2,3 \
+      bash run_eval_libero_gripper_additive_parallel.sh \
+        --directory /data1/wyn/prompt-work/gripper-event-additive-task8-r1 \
+        --repeat 1 --eval-seed 1000 --episodes 30 \
+        --noise-std 0.10 --noise-seed 20261102 --noise-scope task8
+
+`--episodes 30` means 30 initial states per task, or 300 rollouts per
+model, and 1200 across all four models. Use `--episodes 10` for a faster
+initial check or `--episodes 100` for a more reliable comparison.
+
+To add the exact same noise to all ten standard tasks instead:
 
     GPU_IDS=0,1,2,3 \
       bash run_eval_libero_gripper_additive_parallel.sh \
         --directory /data1/wyn/prompt-work/gripper-event-additive-task8-r1 \
-        --repeat 1
+        --repeat 1 --eval-seed 1000 --episodes 30 \
+        --noise-std 0.10 --noise-seed 20261102 --noise-scope all
 
-Or evaluate sequentially:
+Increase to `--noise-std 0.15` for a stronger corruption (this does not
+guarantee a particular success-rate target). Use `--noise-std 0` with this
+additive launcher for a **matched clean control**: pixels are unmodified,
+but the same per-episode policy RNG rule is retained. This is preferable
+when attributing a clean-vs-noisy performance difference to vision noise.
+The old historical clean evaluation (before this change) used a different
+policy RNG schedule and should not be directly treated as this matched
+clean control.
+
+For an apples-to-apples task8 comparison with 30 episodes, run the same
+command twice, first with `--noise-std 0`, then with
+`--noise-std 0.10`, keeping all other arguments fixed.
+Every changed sigma/scope/noise seed has a separate result root, making
+accidental reuse of old clean results unlikely. The resume manifest
+provides a second strict configuration check.
+
+Single-GPU/sequential evaluation is still available:
 
     GPU_ID=0 bash run_eval_libero_gripper_additive.sh all \
-      --directory /data1/wyn/prompt-work/gripper-event-additive-task8-r1 --repeat 1
+      --directory /data1/wyn/prompt-work/gripper-event-additive-task8-r1 \
+      --repeat 1 --noise-std 0.10 --noise-seed 20261102 \
+      --noise-scope task8 --episodes 30
 
-Evaluation only targets standard libero_10 (10 tasks, default 10 episodes/task).
-The parallel entry writes logs under LOG_ROOT/eval-additive-<case>.log.
-It summarizes task8, all ten tasks and the four factorial contrasts. To
-re-summarize:
+Evaluation only supports standard libero_10, not LIBERO-PLUS/PRO. Parallel
+logs include a UTC timestamp and per-invocation PID in their names:
+`LOG_ROOT/eval-additive-fixednoise-<timestamp>-<pid>-<case>.log`.
+The summary reports task8, all ten tasks, four factorial contrasts, and
+the effective noise protocol. After partial evaluations, rerun with the
+identical arguments to resume. To re-summarize separately:
 
     python -m lerobot.scripts.pi05_gripper_event_experiment summarize all \
       --directory /data1/wyn/prompt-work/gripper-event-additive-task8-r1 \
-      --repeat 1
+      --repeat 1 --episodes 30 --eval-seed 1000 \
+      --noise-std 0.10 --noise-seed 20261102 --noise-scope task8
 
-For more reliable conclusions, consider EPISODES_PER_TASK=100 and multiple
-actual TRAINING seeds; adding repeat labels alone does not change randomness.
+For more reliable conclusions, repeat the same noise protocol across
+multiple actual TRAINING seeds; merely changing --repeat does not create a
+new training seed. The task8-only mode should not be called full
+10-task noise robustness, because nine tasks are unperturbed.
 
 ## Important interpretation
 
