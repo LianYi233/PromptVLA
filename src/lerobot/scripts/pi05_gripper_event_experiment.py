@@ -343,7 +343,14 @@ def ensure_noise_config(path, config):
 
 
 def evaluation_root(args, record):
-    base = args.eval_root or args.output_root / "eval" / "gripper-event"
+    # Do not inherit BASE_OUTPUT from unrelated curriculum experiments. The
+    # additive experiment gets its own default root; --eval-root can override.
+    default_name = (
+        "gripper-additive"
+        if record.get("protocol") == "pi05-gripper-additive-long-v1"
+        else "gripper-event"
+    )
+    base = args.eval_root or args.output_root / "eval" / default_name
     noise = fixed_noise_config(args)
     if noise:
         fingerprint = hashlib.sha256(json.dumps(noise, sort_keys=True).encode()).hexdigest()[:12]
@@ -383,11 +390,21 @@ def evaluate(record, jobs, args):
             f"eval_seed={noise_spec['eval_seed']} config={noise_path}",
             flush=True,
         )
+    print(
+        f"Evaluation settings: standard libero_10; episodes_per_task={args.episodes}; "
+        f"eval_seed={args.eval_seed}; noise_std={getattr(args, 'noise_std', 0)}; "
+        f"output={evaluation_root(args, record)}",
+        flush=True,
+    )
     commands = []
     for job in jobs:
         env = os.environ.copy()
-        # Never reuse a stale noise protocol inherited from another evaluation.
-        env.pop("LIBERO_FIXED_NOISE_CONFIG", None)
+        # Do not mix result/log roots or a noise manifest from another project.
+        for stale in (
+            "LIBERO_FIXED_NOISE_CONFIG", "BASE_OUTPUT", "EVAL_LOG_ROOT",
+            "LIBERO_PROGRESS_FD", "LIBERO_PROGRESS_LABEL",
+        ):
+            env.pop(stale, None)
         if noise_path:
             env["LIBERO_FIXED_NOISE_CONFIG"] = str(noise_path)
         for key in ("BASE_CKPT", "BASE_MODEL_PATH", "RUN_PREFIX", "PDET_CASES"):
@@ -400,6 +417,13 @@ def evaluate(record, jobs, args):
             CKPT_ROOT=str(args.output_root.resolve()),
             BASE_OUTPUT=str(evaluation_root(args, record).resolve()),
             LOG_ROOT=str(args.log_root.resolve()),
+            EVAL_LOG_ROOT=str(
+                (args.log_root / "eval" / (
+                    "gripper-additive"
+                    if record.get("protocol") == "pi05-gripper-additive-long-v1"
+                    else "gripper-event"
+                )).resolve()
+            ),
             TRAIN_ACTION_EXPERT="true",
             VLM_PROMPT_TOKENS="2",
             CHECKPOINT_STEP=str(record["settings"]["steps"]),
@@ -571,9 +595,16 @@ def main():
         choices=("online", "offline", "disabled"),
         default=os.environ.get("GRIPPER_EXPERIMENT_DEFAULT_WANDB_MODE", "online"),
     )
-    parser.add_argument("--eval-root", type=Path, default=os.environ.get("BASE_OUTPUT"))
+    parser.add_argument("--eval-root", type=Path, default=os.environ.get("GRIPPER_EVAL_ROOT"))
     parser.add_argument("--eval-seed", type=int, default=int(os.environ.get("EVAL_SEED", "1000")))
-    parser.add_argument("--episodes", type=int, default=int(os.environ.get("EPISODES_PER_TASK", "10")))
+    parser.add_argument(
+        "--episodes",
+        type=int,
+        default=int(os.environ.get(
+            "GRIPPER_EVAL_DEFAULT_EPISODES",
+            os.environ.get("EPISODES_PER_TASK", "10"),
+        )),
+    )
     parser.add_argument(
         "--fixed-eval",
         action="store_true",
@@ -604,6 +635,14 @@ def main():
         if args.repeat < 1 or args.episodes < 1 or args.eval_seed < 0 or args.gpu < 0:
             raise ValueError("Invalid repeat, episodes, evaluation seed, or GPU")
         record = preparation_module(read_json(args.directory / "manifest.json")).check(args.directory)
+        # Legacy direct calls may have relied on BASE_OUTPUT as a default.
+        # Additive evaluations never inherit that unrelated global variable.
+        if (
+            args.eval_root is None
+            and record.get("protocol") == "pi05-gripper-event-long-v1"
+            and os.environ.get("BASE_OUTPUT")
+        ):
+            args.eval_root = Path(os.environ["BASE_OUTPUT"])
         jobs = build_jobs(record, args.directory, args.output_root, args.case, args.repeat)
         if args.command == "train":
             train(record, jobs, args)

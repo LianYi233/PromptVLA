@@ -8,4 +8,7 @@ export GRIPPER_FIXED_NOISE_STD="${GRIPPER_FIXED_NOISE_STD:-0.10}"
 export GRIPPER_FIXED_NOISE_SEED="${GRIPPER_FIXED_NOISE_SEED:-20261102}"
 export GRIPPER_FIXED_NOISE_SCOPE="${GRIPPER_FIXED_NOISE_SCOPE:-task8}"
 export GRIPPER_FIXED_EVAL=true
+export GRIPPER_EVAL_DEFAULT_EPISODES="${GRIPPER_EVAL_DEFAULT_EPISODES:-30}"
+# Ignore inherited output/log destinations from old curriculum test sessions.
+unset BASE_OUTPUT EVAL_LOG_ROOT
 exec python -u -m lerobot.scripts.pi05_gripper_event_experiment eval "$@"

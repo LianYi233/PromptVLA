@@ -221,6 +221,44 @@ identical arguments to resume. To re-summarize separately:
       --repeat 1 --episodes 30 --eval-seed 1000 \
       --noise-std 0.10 --noise-seed 20261102 --noise-scope task8
 
+### GPU OOM and inherited evaluation settings
+
+The 4-GPU launcher checks free GPU memory via `nvidia-smi` **before
+starting any evaluation**. By default, every selected GPU must have at
+least 20,000 MiB free. This is a conservative admission check, NOT a
+guarantee against later simulator/model OOM. It never kills existing jobs.
+
+If it refuses to start:
+
+    nvidia-smi
+    nvidia-smi --query-compute-apps=pid,process_name,used_gpu_memory --format=csv
+
+Stop only your own obsolete training/evaluation processes, or switch
+`GPU_IDS` to four other free GPUs. On cards with less memory or a verified
+smaller footprint, explicitly override `MIN_FREE_GPU_MIB`; do not reduce
+the threshold blindly. `DRY_RUN=true` skips the GPU memory check and
+performs only config/checkpoint preflight.
+
+This project had previously inherited `BASE_OUTPUT` and `EVAL_LOG_ROOT`
+from other curriculum evaluations, producing misleading result paths.
+The additive wrappers now deliberately ignore those variables:
+results default to `CKPT_ROOT/eval/gripper-additive/fixed-image-noise/...`,
+while logs default to `LOG_ROOT/eval/gripper-additive/`. Set
+`GRIPPER_EVAL_ROOT` or pass `--eval-root` to override the result root.
+The original legacy gripper experiment retains its historical
+`BASE_OUTPUT` default outside these wrappers.
+
+The additive launchers now default to 30 episodes/task (instead of
+silently inheriting the old 10-episode setting). Explicit `--episodes 10`
+or `--episodes 100` still overrides it. They print the effective
+episode count, noise configuration and output directory before launch.
+
+A CUDA error during the tiny matrix-multiply preflight occurs **before
+PI05 is loaded** and indicates GPU allocation failure, not corrupt
+checkpoints or a training problem. After clearing GPU contention, rerun
+with identical arguments; task-level resume is supported. Different
+noise/episode settings create distinct output roots.
+
 For more reliable conclusions, repeat the same noise protocol across
 multiple actual TRAINING seeds; merely changing --repeat does not create a
 new training seed. The task8-only mode should not be called full
