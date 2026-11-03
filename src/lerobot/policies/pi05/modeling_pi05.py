@@ -59,7 +59,10 @@ from lerobot.optim.cabo import (
     require_adamw,
     validate_adamw_param_group,
 )
-from lerobot.policies.pi05.action_time import RelativeActionTimeEncoding
+from lerobot.policies.pi05.action_time import (
+    RelativeActionTimeEncoding,
+    make_temporal_projection_hook,
+)
 from lerobot.policies.pi05.attention_pi05 import pi05_attention_forward
 from lerobot.policies.pi05.configuration_pi05 import (
     DEFAULT_IMAGE_SIZE,
@@ -782,6 +785,25 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             if config.action_time_encoding
             else None
         )
+        self._temporal_projection_hooks = []
+        if self.action_time_encoder is not None and config.action_time_injection in ("qk", "v"):
+            # The FIRST Action Expert layer is the controlled intervention.
+            # Hook native projections for both the joint train forward and
+            # suffix-only cached inference, including checkpoint backward replay.
+            # No module replacement: original q_proj/k_proj/v_proj checkpoint
+            # names and pretrained/optimizer weights remain intact.
+            expert_attention = (
+                self.paligemma_with_expert.gemma_expert.model.layers[0].self_attn
+            )
+            projection_names = (
+                ("q_proj", "k_proj") if config.action_time_injection == "qk" else ("v_proj",)
+            )
+            for name in projection_names:
+                projection = getattr(expert_attention, name)
+                hook = make_temporal_projection_hook(
+                    self.action_time_encoder, horizon=config.chunk_size,
+                )
+                self._temporal_projection_hooks.append(projection.register_forward_hook(hook))
 
         # Persist the former inpainting role signal so Stage-1 and Stage-2 state dicts remain identical.
         # It stays zero and frozen for checkpoint compatibility; visible actions remain clean while
@@ -998,7 +1020,10 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         action_emb = self._apply_checkpoint(action_proj_func, noisy_actions)
         # This path is shared by flow-matching training and every inference
         # denoising step. Only the chunk-relative physical clock enters here.
-        if getattr(self, "action_time_encoder", None) is not None:
+        if (
+            getattr(self, "action_time_encoder", None) is not None
+            and self.config.action_time_injection == "input"
+        ):
             action_emb = self.action_time_encoder(action_emb)
 
         def time_mlp_func(time_emb):

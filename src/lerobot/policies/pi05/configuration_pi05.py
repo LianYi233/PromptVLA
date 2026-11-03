@@ -82,6 +82,11 @@ class PI05Config(PreTrainedConfig):
     action_time_encoding: bool = False
     action_time_encoding_dim: int = 32
     action_time_encoding_fps: float = 20.0
+    # One-path temporal intervention for controlled RoPE mechanism study.
+    # With action_time_encoding=False, "input" remains the inactive legacy default.
+    # "qk" and "v" inject the shared 32->expert_width learned temporal residual
+    # through ONLY the selected first-layer native Q/K or V projections.
+    action_time_injection: str = "input"
 
     # Training stage. The default freezes both backbones; full expert adaptation is flow-only.
     # ``next_action`` is kept as the public name for
@@ -220,8 +225,15 @@ class PI05Config(PreTrainedConfig):
             or self.action_time_encoding_fps <= 0
         ):
             raise ValueError("action_time_encoding_fps must be finite and positive")
+        if self.action_time_injection not in ("input", "qk", "v"):
+            raise ValueError("action_time_injection must be input, qk or v")
+        if not self.action_time_encoding and self.action_time_injection != "input":
+            raise ValueError("qk/v action_time_injection requires action_time_encoding=True")
         if self.action_time_encoding and not self.train_action_expert:
             raise ValueError("action_time_encoding requires train_action_expert=True")
+        if self.action_time_encoding and self.action_time_injection in ("qk", "v"):
+            if self.num_prompt_tokens != 0 or self.training_stage != PI05TrainingStage.FLOW:
+                raise ValueError("qk/v temporal injection requires ordinary flow and zero expert prompts")
         if self.freeze_vlm_prompt and not self.train_action_expert:
             raise ValueError("freeze_vlm_prompt requires train_action_expert=True")
         if self.train_action_expert and (

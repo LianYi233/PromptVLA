@@ -52,3 +52,37 @@ class RelativeActionTimeEncoding(nn.Module):
         features = self.features(action_embeddings.shape[1], action_embeddings.device)
         correction = F.linear(features.to(dtype=self.weight.dtype), self.weight)
         return action_embeddings + correction[None].to(dtype=action_embeddings.dtype)
+
+
+
+def make_temporal_projection_hook(
+    encoder: RelativeActionTimeEncoding,
+    *,
+    horizon: int,
+):
+    """Inject W·sinusoidal_time through an EXISTING Q/K/V projection.
+
+    The hook is stateless: it derives the residual entirely from output length,
+    encoder.weight and the hooked projection's own weight. In particular it
+    remains correct when gradient-checkpointing recomputes a layer at backward.
+    This modifies neither projection parameters nor state_dict key names.
+    It must be installed on a FIRST-LAYER Action Expert projection only, and
+    is intentionally restricted to experiments with zero expert prompts.
+    """
+
+    def hook(projection: nn.Module, inputs: tuple[Tensor, ...], output: Tensor) -> Tensor:
+        if not isinstance(output, Tensor) or output.ndim != 3 or output.shape[1] != horizon:
+            raise RuntimeError(
+                "Time-QK/V hook expected only the first-layer action tokens "
+                f"(batch,{horizon},projection_width); got {getattr(output, 'shape', None)}"
+            )
+        if not isinstance(projection, nn.Linear):
+            raise TypeError("Time-QK/V requires the native nn.Linear expert projection")
+        # Identical 32->1024 learnable matrix and fixed temporal basis as
+        # Time-Input. The native pretrained Q/K/V matrix is REUSED, not copied.
+        features = encoder.features(horizon, output.device)
+        residual = F.linear(features.to(dtype=encoder.weight.dtype), encoder.weight)
+        projected = F.linear(residual.to(dtype=projection.weight.dtype), projection.weight)
+        return output + projected.unsqueeze(0).to(dtype=output.dtype)
+
+    return hook
