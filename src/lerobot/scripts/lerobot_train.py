@@ -21,6 +21,7 @@ Requires: pip install 'lerobot[training]'  (includes dataset + accelerate + wand
 import copy
 import dataclasses
 import logging
+import os
 import sys
 import time
 from collections.abc import Iterable
@@ -1017,7 +1018,24 @@ def _train_single_stage(
             from lerobot.utils.pdet_order import PlannedDataset, PlannedSampler, load_plan
 
             sampler = PlannedSampler(load_plan(cfg.pdet.order_plan), start_step=step)
-            training_dataset = PlannedDataset(dataset)
+            if os.environ.get("PI05_CADENCE_PLAN"):
+                from lerobot.scripts.pi05_task7_cadence import CadencePlannedDataset
+
+                if (
+                    cfg.trainable_config.type != "pi05"
+                    or cfg.trainable_config.chunk_size != 50
+                    or cfg.steps != 1000
+                    or cfg.pdet.flow_binding != "occurrence"
+                ):
+                    raise ValueError("Variable cadence requires matched PI05 1000-step PDET flow")
+                prepared = Path(os.environ["PI05_CADENCE_PLAN"]).resolve(strict=True)
+                if (prepared / "uniform.npz").resolve() != Path(cfg.pdet.order_plan).resolve():
+                    raise ValueError("Cadence manifest and PDET order plan differ")
+                training_dataset = CadencePlannedDataset(dataset, prepared)
+            else:
+                training_dataset = PlannedDataset(dataset)
+        elif os.environ.get("PI05_CADENCE_PLAN"):
+            raise ValueError("PI05_CADENCE_PLAN requires a finite PDET order plan")
     else:
         shuffle = True
         sampler = None
@@ -1272,10 +1290,18 @@ def _train_single_stage(
         sample_indices = batch.get("index") if pdet_streams is not None else None
         # Capture identities before processor packing; never expose experiment keys to the model.
         occurrence_ids = batch.pop("_pdet_occurrence_id", None)
+        cadence_delta_t = batch.pop("_cadence_delta_t", None)
         for cam_key in dataset.meta.camera_keys:
             if cam_key in batch and batch[cam_key].dtype == torch.uint8:
                 batch[cam_key] = batch[cam_key].to(dtype=torch.float32) / 255.0
         batch = preprocessor(batch)
+        if cadence_delta_t is not None:
+            # The normalizer/tokenizer pipeline does not own this scalar.
+            # Inject only after preprocessing to ensure it cannot be dropped
+            # or accidentally normalized as an action/state channel.
+            batch["pi05_action_dt"] = torch.as_tensor(
+                cadence_delta_t, dtype=torch.float32, device=device
+            )
         train_tracker.dataloading_s = time.perf_counter() - start_time
 
         forward_kwargs = None

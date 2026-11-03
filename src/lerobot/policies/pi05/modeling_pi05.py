@@ -997,8 +997,8 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
 
         return embs, pad_masks, att_masks
 
-    def embed_suffix(self, noisy_actions, timestep):
-        """Embed [prompt, action] blocks with shared timestep conditioning for the expert."""
+    def embed_suffix(self, noisy_actions, timestep, action_delta_t=None):
+        """Embed [prompt, action]; optional physical Δt is per sample, not flow time."""
         embs = []
         pad_masks = []
         att_masks = []
@@ -1024,7 +1024,9 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             getattr(self, "action_time_encoder", None) is not None
             and self.config.action_time_injection == "input"
         ):
-            action_emb = self.action_time_encoder(action_emb)
+            action_emb = self.action_time_encoder(
+                action_emb, delta_t=action_delta_t, basis=self.config.action_time_basis,
+            )
 
         def time_mlp_func(time_emb):
             x = self.time_mlp_in(time_emb)
@@ -1172,10 +1174,14 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         suffix_out = suffix_out[:, num_prompts:]
         return self._apply_checkpoint(self.action_out_proj, suffix_out)
 
-    def predict_velocity(self, images, img_masks, tokens, masks, x_t, time) -> Tensor:
-        """Predict flow velocity for explicit noisy actions and timesteps."""
+    def predict_velocity(
+        self, images, img_masks, tokens, masks, x_t, time, action_delta_t=None,
+    ) -> Tensor:
+        """Predict flow velocity at matching physical target timestamps."""
         prefix_embs, prefix_pad_masks, _ = self.embed_prefix(images, img_masks, tokens, masks)
-        suffix_embs, suffix_pad_masks, _, adarms_cond = self.embed_suffix(x_t, time)
+        suffix_embs, suffix_pad_masks, _, adarms_cond = self.embed_suffix(
+            x_t, time, action_delta_t=action_delta_t,
+        )
 
         if (
             self.paligemma_with_expert.paligemma.model.language_model.layers[0].self_attn.q_proj.weight.dtype
@@ -1229,6 +1235,7 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         time=None,
         action_is_pad=None,
         inpainting_mask=None,
+        action_delta_t=None,
         objective: PI05TrainingObjective | None = None,
     ) -> Tensor:
         """Do a full training forward pass and compute the loss."""
@@ -1277,7 +1284,9 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         time_expanded = time[:, None, None]
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
-        v_t = self.predict_velocity(images, img_masks, tokens, masks, x_t, time)
+        v_t = self.predict_velocity(
+            images, img_masks, tokens, masks, x_t, time, action_delta_t=action_delta_t,
+        )
 
         return F.mse_loss(u_t, v_t, reduction="none")
 
@@ -2296,6 +2305,12 @@ class PI05Policy(PreTrainedPolicy):
         tokens, masks = batch[f"{OBS_LANGUAGE_TOKENS}"], batch[f"{OBS_LANGUAGE_ATTENTION_MASK}"]
 
         actions = self.prepare_action(batch)
+        action_delta_t = batch.get("pi05_action_dt")
+        if self.config.action_time_basis != "index":
+            if action_delta_t is None:
+                raise ValueError("pi05_action_dt missing for variable-cadence training")
+            if action_delta_t.shape != (actions.shape[0],):
+                raise ValueError("Expected one physical Δt per action chunk")
 
         # Compute loss (no separate state needed for PI05)
         losses = self.model.forward(
@@ -2306,6 +2321,7 @@ class PI05Policy(PreTrainedPolicy):
             actions,
             noise=noise,
             time=time,
+            action_delta_t=action_delta_t,
             objective=PI05TrainingObjective.OBSERVATION_FLOW,
         )
 

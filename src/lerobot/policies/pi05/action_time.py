@@ -39,19 +39,57 @@ class RelativeActionTimeEncoding(nn.Module):
         self.fps = float(fps)
         self.weight = nn.Parameter(torch.zeros(width, encoding_dim))
 
-    def features(self, horizon: int, device: torch.device) -> Tensor:
-        """Return H x D features with fixed frequencies from 0.1 to 10 Hz."""
-        offsets = torch.arange(horizon, dtype=torch.float32, device=device) / self.fps
+    def features(
+        self,
+        horizon: int,
+        device: torch.device,
+        *,
+        delta_t: Tensor | None = None,
+        basis: str = "index",
+    ) -> Tensor:
+        """Index features [H,32] or exact per-sample temporal features [B,H,32].
+
+        index: φ(j/fps), independent of true sample cadence;
+        global_dt: φ(Δt) at every token, a per-sample constant;
+        physical: φ(j·Δt) at each target timestamp.
+        All share the SAME 32 features and zero-initialized projection.
+        """
+        if basis not in ("index", "global_dt", "physical"):
+            raise ValueError("Unknown action time basis")
+        offsets = torch.arange(horizon, dtype=torch.float32, device=device)
+        if basis == "index":
+            seconds = offsets / self.fps
+        else:
+            if delta_t is None:
+                raise ValueError("Per-sample physical/global dt requires pi05_action_dt in batch")
+            delta = torch.as_tensor(delta_t, dtype=torch.float32, device=device)
+            if delta.ndim != 1 or not torch.isfinite(delta).all() or not (delta > 0).all():
+                raise ValueError("delta_t must be finite positive tensor [batch]")
+            seconds = (
+                delta[:, None].expand(-1, horizon)
+                if basis == "global_dt"
+                else delta[:, None] * offsets[None, :]
+            )
         frequencies = torch.logspace(-1, 1, self.encoding_dim // 2, device=device)
-        phases = 2 * math.pi * offsets[:, None] * frequencies[None, :]
+        phases = 2 * math.pi * seconds[..., None] * frequencies
         return torch.cat((phases.sin(), phases.cos()), dim=-1)
 
-    def forward(self, action_embeddings: Tensor) -> Tensor:
+    def forward(
+        self, action_embeddings: Tensor, *,
+        delta_t: Tensor | None = None, basis: str = "index",
+    ) -> Tensor:
         if action_embeddings.ndim != 3 or action_embeddings.shape[-1] != self.weight.shape[0]:
             raise ValueError("action_embeddings must have shape (batch, horizon, expert_width)")
-        features = self.features(action_embeddings.shape[1], action_embeddings.device)
+        features = self.features(
+            action_embeddings.shape[1], action_embeddings.device,
+            delta_t=delta_t, basis=basis,
+        )
+        if features.ndim == 3 and features.shape[0] != action_embeddings.shape[0]:
+            raise ValueError("delta_t length differs from action batch size")
         correction = F.linear(features.to(dtype=self.weight.dtype), self.weight)
-        return action_embeddings + correction[None].to(dtype=action_embeddings.dtype)
+        if correction.ndim == 2:
+            correction = correction.unsqueeze(0)
+        return action_embeddings + correction.to(dtype=action_embeddings.dtype)
 
 
 

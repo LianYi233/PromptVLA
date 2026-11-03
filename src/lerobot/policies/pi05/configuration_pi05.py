@@ -87,6 +87,9 @@ class PI05Config(PreTrainedConfig):
     # "qk" and "v" inject the shared 32->expert_width learned temporal residual
     # through ONLY the selected first-layer native Q/K or V projections.
     action_time_injection: str = "input"
+    # Optional variable-cadence experiment: index, one global sampling interval,
+    # or per-action physical offsets j*delta_t. Existing checkpoints default to index.
+    action_time_basis: str = "index"
 
     # Training stage. The default freezes both backbones; full expert adaptation is flow-only.
     # ``next_action`` is kept as the public name for
@@ -227,6 +230,11 @@ class PI05Config(PreTrainedConfig):
             raise ValueError("action_time_encoding_fps must be finite and positive")
         if self.action_time_injection not in ("input", "qk", "v"):
             raise ValueError("action_time_injection must be input, qk or v")
+        if self.action_time_basis not in ("index", "global_dt", "physical"):
+            raise ValueError("action_time_basis must be index, global_dt or physical")
+        if self.action_time_basis != "index":
+            if not self.action_time_encoding or self.action_time_injection != "input":
+                raise ValueError("Variable action_time_basis requires input temporal encoding")
         if not self.action_time_encoding and self.action_time_injection != "input":
             raise ValueError("qk/v action_time_injection requires action_time_encoding=True")
         if self.action_time_encoding and not self.train_action_expert:
