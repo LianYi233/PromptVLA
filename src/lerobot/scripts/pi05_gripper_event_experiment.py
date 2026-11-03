@@ -342,6 +342,10 @@ def ensure_noise_config(path, config):
         save_record(path, config)
 
 
+def selected_task_only(args):
+    return bool(getattr(args, "only_selected_task", False))
+
+
 def evaluation_root(args, record):
     # Do not inherit BASE_OUTPUT from unrelated curriculum experiments. The
     # additive experiment gets its own default root; --eval-root can override.
@@ -362,13 +366,20 @@ def evaluation_root(args, record):
     selection = record["selection"]
     identity = hashlib.sha256(json.dumps(record, sort_keys=True).encode()).hexdigest()[:12]
     experiment_name = f"task{selection['task_id']}-ep{selection['episode_index']}-{identity}"
-    return base / experiment_name / f"r{args.repeat}-seed{args.eval_seed}-n{args.episodes}"
+    run_id = f"r{args.repeat}-seed{args.eval_seed}-n{args.episodes}"
+    if selected_task_only(args):
+        run_id += f"-task{record['selection']['task_id']}-only-clean"
+    return base / experiment_name / run_id
 
 
 def result_path(job, record, args):
+    suite_tag = (
+        f"libero_10-task{record['selection']['task_id']}"
+        if selected_task_only(args) else "libero_10"
+    )
     return (
         evaluation_root(args, record)
-        / (f"libero060-all-{job['name']}-{record['settings']['steps']:06d}-libero_10-resume")
+        / (f"libero060-all-{job['name']}-{record['settings']['steps']:06d}-{suite_tag}-resume")
         / "eval_info.json"
     )
 
@@ -391,7 +402,9 @@ def evaluate(record, jobs, args):
             flush=True,
         )
     print(
-        f"Evaluation settings: standard libero_10; episodes_per_task={args.episodes}; "
+        f"Evaluation settings: standard libero_10"
+        f"{'/task' + str(record['selection']['task_id']) if selected_task_only(args) else '/all10'}"
+        f"; episodes_per_task={args.episodes}; "
         f"eval_seed={args.eval_seed}; noise_std={getattr(args, 'noise_std', 0)}; "
         f"output={evaluation_root(args, record)}",
         flush=True,
@@ -401,10 +414,13 @@ def evaluate(record, jobs, args):
         env = os.environ.copy()
         # Do not mix result/log roots or a noise manifest from another project.
         for stale in (
-            "LIBERO_FIXED_NOISE_CONFIG", "BASE_OUTPUT", "EVAL_LOG_ROOT",
+            "LIBERO_FIXED_NOISE_CONFIG", "LIBERO_SELECTED_TASK_ID",
+            "BASE_OUTPUT", "EVAL_LOG_ROOT",
             "LIBERO_PROGRESS_FD", "LIBERO_PROGRESS_LABEL",
         ):
             env.pop(stale, None)
+        if selected_task_only(args):
+            env["LIBERO_SELECTED_TASK_ID"] = str(record["selection"]["task_id"])
         if noise_path:
             env["LIBERO_FIXED_NOISE_CONFIG"] = str(noise_path)
         for key in ("BASE_CKPT", "BASE_MODEL_PATH", "RUN_PREFIX", "PDET_CASES"):
@@ -444,7 +460,7 @@ def evaluate(record, jobs, args):
     summarize(record, jobs, args)
 
 
-def read_eval_result(path, selected_task, episodes):
+def read_eval_result(path, selected_task, episodes, *, only_selected=False):
     info = read_json(path)
     tasks = info.get("per_task", info.get("Aggregated Metrics for per_task", []))
     rows = {}
@@ -462,13 +478,18 @@ def read_eval_result(path, selected_task, episodes):
             "episodes": len(values),
             "rate": 100 * sum(values) / len(values),
         }
-    if set(rows) != set(range(10)):
-        raise ValueError("Expected all ten LIBERO-long tasks; partial results are not a completed evaluation")
+    required = {selected_task} if only_selected else set(range(10))
+    if set(rows) != required:
+        raise ValueError(
+            "Evaluation task coverage mismatch; expected task"
+            f" IDs {sorted(required)}, found {sorted(rows)}"
+        )
     successes = sum(row["successes"] for row in rows.values())
+    total = episodes * len(required)
     return {
         "overall_successes": successes,
-        "overall_episodes": episodes * 10,
-        "overall_rate": 100 * successes / (episodes * 10),
+        "overall_episodes": total,
+        "overall_rate": 100 * successes / total,
         "selected_task_rate": rows[selected_task]["rate"],
         "per_task": rows,
     }
@@ -493,7 +514,12 @@ def summarize(record, jobs, args):
                 (applied.get("config_sha256"), applied.get("helper_sha256"))
             )
         results[job["case"]] = {
-            **read_eval_result(path, record["selection"]["task_id"], args.episodes),
+            **read_eval_result(
+                path,
+                record["selection"]["task_id"],
+                args.episodes,
+                only_selected=selected_task_only(args),
+            ),
             "eval_info": str(path),
             "checkpoint": str(job["checkpoint"]),
         }
@@ -514,6 +540,10 @@ def summarize(record, jobs, args):
         "selection": record["selection"],
         "eval_seed": args.eval_seed,
         "episodes_per_task": args.episodes,
+        "evaluated_task_ids": (
+            [record["selection"]["task_id"]]
+            if selected_task_only(args) else list(range(10))
+        ),
         "fixed_observation_noise": noise_spec,
         "success_rate_scope": (
             "all ten tasks clean; deterministic per-episode policy RNG"
@@ -531,19 +561,27 @@ def summarize(record, jobs, args):
     suffix = "all" if len(jobs) == 4 else jobs[0]["case"]
     target = destination / f"summary-{suffix}.json"
     target.write_text(json.dumps(summary, indent=2) + "\n")
+    task_ids = (
+        [record["selection"]["task_id"]]
+        if selected_task_only(args) else list(range(10))
+    )
     with (destination / f"summary-{suffix}.csv").open("w", newline="") as stream:
         writer = csv.writer(stream)
-        writer.writerow(["case", "selected_task_rate", "overall_rate", *[f"task_{i}" for i in range(10)]])
+        writer.writerow(["case", "selected_task_rate", "overall_rate", *[f"task_{i}" for i in task_ids]])
         for case, result in results.items():
             writer.writerow(
                 [
                     case,
                     result["selected_task_rate"],
                     result["overall_rate"],
-                    *[result["per_task"][i]["rate"] for i in range(10)],
+                    *[result["per_task"][i]["rate"] for i in task_ids],
                 ]
             )
-    print("case              selected task    LIBERO-long overall")
+    label = (
+        f"task{record['selection']['task_id']} only"
+        if selected_task_only(args) else "LIBERO-long overall"
+    )
+    print(f"case              selected task    {label}")
     for case, result in results.items():
         print(f"{case:18s} {result['selected_task_rate']:8.2f}%        {result['overall_rate']:8.2f}%")
     print(f"Results: {target}", flush=True)
@@ -598,6 +636,11 @@ def main():
     parser.add_argument("--eval-root", type=Path, default=os.environ.get("GRIPPER_EVAL_ROOT"))
     parser.add_argument("--eval-seed", type=int, default=int(os.environ.get("EVAL_SEED", "1000")))
     parser.add_argument(
+        "--only-selected-task", action="store_true",
+        default=os.environ.get("GRIPPER_ONLY_SELECTED_TASK", "false").lower() == "true",
+        help="Evaluate only the prepared LIBERO-long task; scoped to task7 1000-step runs",
+    )
+    parser.add_argument(
         "--episodes",
         type=int,
         default=int(os.environ.get(
@@ -635,6 +678,15 @@ def main():
         if args.repeat < 1 or args.episodes < 1 or args.eval_seed < 0 or args.gpu < 0:
             raise ValueError("Invalid repeat, episodes, evaluation seed, or GPU")
         record = preparation_module(read_json(args.directory / "manifest.json")).check(args.directory)
+        if selected_task_only(args):
+            if (
+                record.get("protocol") != "pi05-gripper-additive-long-v1"
+                or record["selection"]["task_id"] != 7
+                or record["settings"]["steps"] != 1000
+            ):
+                raise ValueError("Selected-task-only mode requires task7 additive 1000-step preparation")
+            if args.noise_std != 0 or args.fixed_eval:
+                raise ValueError("Task7-only evaluation must be clean: --noise-std 0, no --fixed-eval")
         # Legacy direct calls may have relied on BASE_OUTPUT as a default.
         # Additive evaluations never inherit that unrelated global variable.
         if (

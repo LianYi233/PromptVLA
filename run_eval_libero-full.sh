@@ -10,6 +10,7 @@ usage() {
   echo "VARIANT: full_reference, no_bridge, direct_dual, dual_prompt_only, vlm_only, action_only, no_cabo, pi05_libero_base"
   echo "Defaults: all suites, training seed 0, checkpoint 3000, 10 episodes/task."
   echo "VLM_PROMPT_TOKENS=8 bash $0 vlm_only all 0  # token-sweep checkpoint"
+  echo "Use LIBERO_SELECTED_TASK_ID=7 to evaluate only task7 of standard libero_10."
   echo "With VLM_PROMPT_TOKENS, legacy run names are pi05-vlm_only-vlmN-seedS; set CKPT_ROOT for legacy outputs."
   echo "For native VLM-only runs use run_eval_libero_vlm_only.sh or run_eval_libero_vlm_only_token_sweep.sh."
   echo "Overrides: CKPT_ROOT, BASE_CKPT, BASE_OUTPUT, RUN_NAME, CHECKPOINT_STEP (0 allowed), EPISODES_PER_TASK, GPU_ID, EVAL_SEED."
@@ -116,6 +117,21 @@ if [[ -n "${LIBERO_ROBUSTNESS_MANIFEST:-}" ]]; then
   TASKS=$(python -m lerobot.scripts.libero_robustness tasks "$LIBERO_ROBUSTNESS_MANIFEST")
   SUITE_TAG="${LIBERO_BENCHMARK}-${SUITE_TAG}"
 fi
+# Optional one-task LIBERO-long subset for the focused task7 study.
+# Use the native environment task filter; do not instantiate or score
+# any of the other nine tasks.
+LIBERO_SELECTED_TASK_ID="${LIBERO_SELECTED_TASK_ID:-}"
+if [[ -n "$LIBERO_SELECTED_TASK_ID" ]]; then
+  if [[ "$ENV_TYPE" != libero || "$TASKS" != libero_10 || -n "${LIBERO_ROBUSTNESS_MANIFEST:-}" ]]; then
+    echo "LIBERO_SELECTED_TASK_ID requires standard libero_10 without robustness overrides" >&2
+    exit 2
+  fi
+  if [[ ! "$LIBERO_SELECTED_TASK_ID" =~ ^[0-9]$ ]]; then
+    echo "LIBERO_SELECTED_TASK_ID must be an integer from 0 to 9" >&2
+    exit 2
+  fi
+  SUITE_TAG="${SUITE_TAG}-task${LIBERO_SELECTED_TASK_ID}"
+fi
 export CUDA_VISIBLE_DEVICES="${GPU_ID:-0}"
 export MUJOCO_GL=egl
 export PYOPENGL_PLATFORM=egl
@@ -211,6 +227,9 @@ PY
     --policy.compile_model=false
     --policy.gradient_checkpointing=false
   )
+  if [[ -n "$LIBERO_SELECTED_TASK_ID" ]]; then
+    EVAL_ARGS+=(--env.task_ids="[$LIBERO_SELECTED_TASK_ID]")
+  fi
   if [[ -n "${LIBERO_ROBUSTNESS_MANIFEST:-}" ]]; then
     EVAL_ARGS+=(--env.observation_height=224 --env.observation_width=224)
     if [[ -n "${TOKENIZER_PATH:-}" ]]; then EVAL_ARGS+=(--policy.tokenizer_name="$TOKENIZER_PATH"); fi
