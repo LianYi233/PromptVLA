@@ -638,7 +638,7 @@ def main():
     parser.add_argument(
         "--only-selected-task", action="store_true",
         default=os.environ.get("GRIPPER_ONLY_SELECTED_TASK", "false").lower() == "true",
-        help="Evaluate only the prepared LIBERO-long task; scoped to task7 1000-step runs",
+        help="Evaluate only the prepared LIBERO-long task; scoped to task7 1200-step runs",
     )
     parser.add_argument(
         "--episodes",
@@ -682,9 +682,11 @@ def main():
             if (
                 record.get("protocol") != "pi05-gripper-additive-long-v1"
                 or record["selection"]["task_id"] != 7
-                or record["settings"]["steps"] != 1000
+                or record["settings"]["steps"] != 1200
+                or record["settings"]["base_steps"] != 1000
+                or record["settings"]["extra_steps"] != 200
             ):
-                raise ValueError("Selected-task-only mode requires task7 additive 1000-step preparation")
+                raise ValueError("Selected-task-only mode requires task7 additive 1000+200-step preparation")
             if args.noise_std != 0 or args.fixed_eval:
                 raise ValueError("Task7-only evaluation must be clean: --noise-std 0, no --fixed-eval")
         # Legacy direct calls may have relied on BASE_OUTPUT as a default.

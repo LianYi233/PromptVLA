@@ -1,4 +1,4 @@
-"""Focused task7 experiment: single demo, 800+200 updates, task7-only clean evaluation."""
+"""Focused task7 experiment: single demo, 1000+200 updates, task7-only clean evaluation."""
 
 import json
 from pathlib import Path
@@ -62,9 +62,9 @@ def test_auto_selects_one_full_task7_episode_instead_of_task8(prepared):
     assert actual["episode_index"] == 1
     assert actual["episode_length"] == 120
     assert actual["closure_frames"] == [20, 70]
-    assert actual["base_steps"] == 800
+    assert actual["base_steps"] == 1000
     assert actual["extra_steps"] == 200
-    assert actual["total_steps"] == 1000
+    assert actual["total_steps"] == 1200
     assert actual["batch_size"] == 2
     assert actual["world_size"] == 2
     assert task7.check(root) == actual
@@ -75,16 +75,16 @@ def test_four_training_plans_matched_and_contiguous(dataset, prepared, tmp_path)
     base_plan = load_plan(root / "base" / "uniform.npz")
     uniform = load_plan(root / "additive" / "uniform.npz")
     event = load_plan(root / "additive" / "event.npz")
-    slots = additive.additive_slots(800, 200)
+    slots = additive.additive_slots(1000, 200)
     metadata = read_frame_metadata(dataset)
     original = base_plan["index"][base_plan["order"]]
-    assert original.shape == (3200,)
-    assert len(slots) == 1000 and int(slots.sum()) == 200
+    assert original.shape == (4000,)
+    assert len(slots) == 1200 and int(slots.sum()) == 200
     for plan in (uniform, event):
-        validate_plan_dataset(plan, metadata, steps=1000, batch_size=2, world_size=2)
-        stream = plan["index"].reshape(1000, 4)
+        validate_plan_dataset(plan, metadata, steps=1200, batch_size=2, world_size=2)
+        stream = plan["index"].reshape(1200, 4)
         assert np.array_equal(stream[~slots].reshape(-1), original)
-        assert len(plan["index"]) == 4000
+        assert len(plan["index"]) == 4800
         assert set(plan["episode_index"]) == {1}
         assert set(plan["task_index"]) == {31}
         # No 50-step target crosses an episode boundary.
@@ -98,8 +98,8 @@ def test_four_training_plans_matched_and_contiguous(dataset, prepared, tmp_path)
     assert [j["case"] for j in jobs] == list(runner.CASES)
     assert jobs[0]["plan"] == jobs[2]["plan"]
     assert jobs[1]["plan"] == jobs[3]["plan"]
-    assert all("-task7-ep1-base800-extra200-steps1000-" in j["name"] for j in jobs)
-    assert all(j["checkpoint"].parts[-2:] == ("001000", "pretrained_model") for j in jobs)
+    assert all("-task7-ep1-base1000-extra200-steps1200-" in j["name"] for j in jobs)
+    assert all(j["checkpoint"].parts[-2:] == ("001200", "pretrained_model") for j in jobs)
 
 
 def actual_manifest(root):
@@ -184,3 +184,34 @@ def test_task7_prepare_idempotent_and_rejects_wrong_episode(dataset, prepared):
             work_dir=root / "wrong", dataset_root=dataset,
             episode_index=0, batch_size=2, world_size=2,
         )
+
+
+def test_training_launcher_uses_1200_steps_and_saved_additive_plans(prepared, tmp_path):
+    root, _ = prepared
+    record = actual_manifest(root)
+    jobs = runner.build_jobs(record, root / "additive", tmp_path / "models")
+    args = SimpleNamespace(
+        source=tmp_path / "source",
+        tokenizer=tmp_path / "tokenizer",
+        dataset_repo_id="libero",
+        output_root=tmp_path / "models",
+        log_root=tmp_path / "logs",
+        gpus="1,3",
+        port=29589,
+        dry_run=True,
+        num_workers=0,
+        wandb_mode="offline",
+    )
+    for job in jobs:
+        command, environment = runner.training_command(
+            job, record, args, tmp_path / "P1.safetensors"
+        )
+        assert environment["FLOW_STEPS"] == "1200"
+        assert environment["BATCH_SIZE"] == "2"
+        assert environment["NUM_PROCESSES"] == "2"
+        assert environment["GPU_IDS"] == "1,3"
+        assert "--pdet.audit_steps=1200" in command
+        assert f"--pdet.order_plan={job['plan']}" in command
+        assert f"--policy.action_time_encoding={str(job['time_encoding']).lower()}" in command
+        assert command[-2:] == ["--wandb.mode=offline", "--wandb.project=prompt-learning"]
+        assert job["checkpoint"].parent.name == "001200"

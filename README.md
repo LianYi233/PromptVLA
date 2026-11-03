@@ -38,7 +38,7 @@ D/E/F 新种子重复：见 [D1/E1/F1、D2/E2/F2 一次启动说明](examples/an
 
 两样本顺序对照：见 [同一对简单/困难观测，交换两个3000步阶段](examples/analysis/README_pi05_two_frame.md)。复用评分缓存，选同 task/episode 的两个完整、不重叠动作窗口；E2H/H2E 各训练6000步、曝光各半，固定帧与噪声配对，仅训练VLM2+完整action expert。四卡并行两组，记录两个训练样本各自的固定损失，只保存最终006000。
 
-LIBERO-long task7 单示范 1000 步、只评测 task7/10 episodes 的四组干净对照：[Task7 1k Experiment](examples/analysis/README_pi05_gripper_task7.md)。
+LIBERO-long task7 单示范 1200 步（1000 步基础 + 200 步额外采样）、只评测 task7/10 episodes 的四组干净对照：[Task7 1200-step Experiment](examples/analysis/README_pi05_gripper_task7.md)。
 
 LIBERO-long 追加关键帧曝光实验：见 [保留原Uniform的3000步，四组等预算追加750步对照](examples/analysis/README_pi05_gripper_additive.md)。同一条task8/ep10示范，均匀追加与闭合邻域追加各做时间编码开关对照；新增分支不覆盖旧3000步实验。 四卡评测支持对task8双相机施加可复现的高斯图像噪声（亦可扩展到所有long任务），并按扰动配置隔离结果。
 

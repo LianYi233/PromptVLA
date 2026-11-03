@@ -1,7 +1,7 @@
-"""Prepare a task7-only, one-demonstration, 1000-update additive 2x2 experiment.
+"""Prepare a task7-only, one-demonstration, 1200-update additive 2x2 experiment.
 
 The first eligible task7 episode is selected once and recorded; all four
-conditions reuse that exact episode. The original 800 Uniform updates are
+conditions reuse that exact episode. The original 1000 Uniform updates are
 shared, and a compute-matched 200 added updates are sampled uniformly or
 from a ±5-frame gripper-closure neighborhood. Targets stay contiguous.
 """
@@ -14,10 +14,10 @@ from lerobot.scripts import pi05_gripper_additive as additive
 from lerobot.scripts import pi05_gripper_event as base
 
 TASK_ID = 7
-BASE_STEPS = 800
+BASE_STEPS = 1000
 EXTRA_STEPS = 200
 TOTAL_STEPS = BASE_STEPS + EXTRA_STEPS
-DEFAULT_DIR = Path("/data1/wyn/prompt-work/gripper-event-task7-1k")
+DEFAULT_DIR = Path("/data1/wyn/prompt-work/gripper-event-task7-1200")
 DEFAULT_DATASET = Path("/home/wyn/datasets/libero")
 
 
@@ -35,7 +35,7 @@ def _verify(original, prepared, work_dir):
         )
         or original["selection"]["task_index"] != prepared["selection"]["task_index"]
     ):
-        raise ValueError("Task7 preparation does not match the one-episode 800+200 recipe")
+        raise ValueError("Task7 preparation does not match the one-episode 1000+200 recipe")
     if original["dataset_root"] != prepared["dataset_root"]:
         raise ValueError("Task7 plans refer to different datasets")
     if original["settings"]["batch_size"] != prepared["settings"]["batch_size"]:
@@ -143,7 +143,7 @@ def main():
                 min_state_frames=args.min_state_frames,
             )
     except (OSError, ValueError, KeyError) as error:
-        parser.exit(1, f"Task7 1k preparation failed: {error}\n")
+        parser.exit(1, f"Task7 1200-step preparation failed: {error}\n")
     print(json.dumps(summary, indent=2), flush=True)
 
 
