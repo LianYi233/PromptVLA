@@ -236,3 +236,50 @@ def test_mode_validation_guards_qk_and_v_without_active_time():
         cfg = PI05Config(**args, action_time_encoding=True, action_time_injection=mode)
         assert cfg.action_time_injection == mode
         assert cfg.action_time_encoding is True
+
+
+def test_train_pi05_vlm_only_shell_accepts_all_time_injection_overrides(tmp_path):
+    """Exercise the real shell argument gate without loading a model or using GPUs."""
+    import os
+    import subprocess
+
+    repo = Path(__file__).resolve().parents[2]
+    root = tmp_path / "preflight"
+    for directory in ("source", "dataset", "tokenizer", "bin"):
+        (root / directory).mkdir(parents=True)
+    # Mock ONLY the slow Python preflight checks; actual shell parsing,
+    # argument assembly and DRY_RUN command emission remain unmodified.
+    python_stub = root / "bin" / "python"
+    python_stub.write_text("#!/bin/sh\nexit 0\n")
+    python_stub.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{root / 'bin'}:{os.environ['PATH']}",
+        "PRETRAINED_PATH": str(root / "source"),
+        "DATASET_ROOT": str(root / "dataset"),
+        "TOKENIZER_PATH": str(root / "tokenizer"),
+        "OUTPUT_ROOT": str(root / "outputs"),
+        "RUN_NAME": "timepath-arg-gate-test",
+        "GPU_IDS": "0,1",
+        "NUM_PROCESSES": "2",
+        "BATCH_SIZE": "32",
+        "FLOW_STEPS": "1000",
+        "TRAIN_ACTION_EXPERT": "true",
+        "VLM_PROMPT_TOKENS": "2",
+        "DRY_RUN": "true",
+        "SAVE_ONLY_FINAL": "true",
+    }
+    for route in ("input", "qk", "v"):
+        command = [
+            "bash", str(repo / "examples/training/train_pi05_vlm_only.sh"),
+            "base", "0", "--policy.compile_model=false",
+            "--policy.action_time_encoding=true",
+            f"--policy.action_time_injection={route}",
+        ]
+        result = subprocess.run(
+            command, cwd=repo, env=env, capture_output=True, text=True, check=False
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert f"--policy.action_time_injection={route}" in result.stdout
+        assert "--steps=1000" in result.stdout
+        assert "--policy.action_time_encoding=true" in result.stdout

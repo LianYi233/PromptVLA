@@ -32,7 +32,9 @@ Extra args (use --key=value): --wandb.*, --policy.optimizer_*, --policy.schedule
 --prompt_rank.* enables fixed-probe velocity-to-prompt Jacobian spectra (requires no compile).
 --pdet.* separates data order, flow noise and flow time; prefer train_pi05_vlm_only_pdet_sweep.sh.
 --policy.action_time_encoding/encoding_dim/encoding_fps configure the opt-in full-expert
-relative action-time experiment; see train_pi05_gripper_event.sh for matched controls.
+relative action-time experiment. --policy.action_time_injection=input|qk|v selects the
+action-input, first-expert-layer Q/K, or first-expert-layer V injection route
+(see train_pi05_task7_timepath.sh for the matched 1000-step task7 experiment).
 EOF
   exit 0
 fi
@@ -45,7 +47,7 @@ for arg in "${EXTRA_ARGS[@]}"; do
     --wandb.*=*|--policy.optimizer_*=*|--policy.scheduler_*=*|--policy.compile_model=*|\
     --policy.gradient_checkpointing=*|--policy.action_time_encoding=*|\
     --policy.action_time_encoding_dim=*|--policy.action_time_encoding_fps=*|\
-    --num_workers=*|--log_freq=*|--prompt_rank.*=*|--pdet.*=*|--keyframe_loss.*=*) ;;
+    --policy.action_time_injection=*|--num_workers=*|--log_freq=*|--prompt_rank.*=*|--pdet.*=*|--keyframe_loss.*=*) ;;
     *) echo "Unsupported override: $arg; use --help for VLM-only controls" >&2; exit 2 ;;
   esac
 done
