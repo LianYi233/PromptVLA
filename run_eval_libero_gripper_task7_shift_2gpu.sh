@@ -21,7 +21,10 @@ for arg in "${ARGS[@]}"; do
     has_shift=true
   fi
 done
-if [[ "$has_shift" == false && -z "${TASK7_OBJECT_SHIFT_M:-}" ]]; then
+if [[ "$has_shift" == false ]]; then
+  # Never let a stale TASK7_OBJECT_SHIFT_M from another shell override the
+  # preregistered Uniform-only calibration. Explicit --shift-m is the override.
+  unset TASK7_OBJECT_SHIFT_M
   CALIBRATION="${TASK7_SHIFT_CALIBRATION:-/data1/wyn/prompt-work/gripper-event-task7-1200/shift-calibration.json}"
   if [[ ! -f "$CALIBRATION" ]]; then
     echo "Missing calibrated shift: $CALIBRATION" >&2

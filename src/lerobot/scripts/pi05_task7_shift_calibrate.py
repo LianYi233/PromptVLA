@@ -143,6 +143,13 @@ def calibrate(args):
         })
 
     best = min(outcomes, key=lambda row: (abs(row["rate"] - 50), row["shift_m"]))
+    if abs(best["rate"] - 50) > 10:
+        print(
+            f"WARNING: closest Uniform pilot is {best['rate']:.1f}% at "
+            f"{best['shift_m']:.3f}m, NOT near the intended 50%. "
+            "Do not claim the benchmark has been calibrated to 50%.",
+            flush=True,
+        )
     record = {
         "protocol": PROTOCOL,
         "task_id": 7,
