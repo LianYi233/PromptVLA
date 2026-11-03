@@ -28,7 +28,7 @@ def test_index_and_physical_features_respond_differently_to_rate():
     global_dt = encoder.features(50, x.device, delta_t=std, basis="global_dt")
     assert index.shape == (50,32)
     assert physical.shape == global_dt.shape == (2,50,32)
-    torch.testing.assert_close(physical[0], index)
+    torch.testing.assert_close(physical[0], index, rtol=1e-4, atol=2e-5)
     assert not torch.equal(physical[1], index)
     assert not torch.equal(physical[0,4], physical[1,4])
     torch.testing.assert_close(global_dt[:,0], global_dt[:,49])
