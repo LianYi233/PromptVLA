@@ -132,6 +132,7 @@ class LiberoEnv(gym.Env):
     ):
         super().__init__()
         self.task_id = task_id
+        self.task_suite_name = task_suite_name
         self.is_libero_plus = is_libero_plus
         self.obs_type = obs_type
         self.render_mode = render_mode
@@ -370,9 +371,30 @@ class LiberoEnv(gym.Env):
         super().reset(seed=seed)
         self._env.seed(seed)
         raw_obs = self._env.reset()
+        shift_config = None
+        if os.environ.get("LIBERO_TASK7_OBJECT_SHIFT_CONFIG"):
+            if self.task_id != 7 or self.task_suite_name != "libero_10":
+                raise ValueError("Fixed object shift is only valid for standard libero_10 task7")
+            from lerobot.scripts.pi05_task7_object_shift import read_config
+
+            shift_config = read_config(os.environ["LIBERO_TASK7_OBJECT_SHIFT_CONFIG"])
         if self.init_states and self._init_states is not None:
-            raw_obs = self._env.set_init_state(self._init_states[self.init_state_id % len(self._init_states)])
-            self.init_state_id += self._reset_stride  # Change init_state_id when reset
+            if shift_config is not None and seed is not None:
+                from lerobot.scripts.pi05_task7_object_shift import init_state_for_episode
+
+                state_index = init_state_for_episode(
+                    int(seed), shift_config, len(self._init_states)
+                )
+            else:
+                state_index = self.init_state_id % len(self._init_states)
+            raw_obs = self._env.set_init_state(self._init_states[state_index])
+            self.init_state_id += self._reset_stride  # Legacy path unchanged when perturbation is off.
+            if shift_config is not None and seed is not None:
+                from lerobot.scripts.pi05_task7_object_shift import apply_shift
+
+                raw_obs = apply_shift(self, shift_config, int(seed))
+        elif shift_config is not None:
+            raise ValueError("Task7 object-shift evaluation requires official fixed init states")
 
         # After reset, objects may be unstable (slightly floating, intersecting, etc.).
         # Step the simulator with a no-op action for a few frames so everything settles.

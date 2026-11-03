@@ -151,6 +151,20 @@ if [[ -n "${LIBERO_FIXED_NOISE_CONFIG:-}" ]]; then
   fi
 fi
 
+if [[ -n "${LIBERO_TASK7_OBJECT_SHIFT_CONFIG:-}" ]]; then
+  if [[ "$ENV_TYPE" != libero || "$TASKS" != libero_10 \
+        || "$LIBERO_SELECTED_TASK_ID" != 7 \
+        || -n "${LIBERO_ROBUSTNESS_MANIFEST:-}" \
+        || -n "${LIBERO_FIXED_NOISE_CONFIG:-}" ]]; then
+    echo "Object shift requires standard libero_10 task7, without image noise or robustness forks" >&2
+    exit 2
+  fi
+  if [[ "$DRY_RUN" != true && ! -f "$LIBERO_TASK7_OBJECT_SHIFT_CONFIG" ]]; then
+    echo "Object shift config missing: $LIBERO_TASK7_OBJECT_SHIFT_CONFIG" >&2
+    exit 2
+  fi
+fi
+
 CKPT_ROOT="${CKPT_ROOT:-${DEFAULT_CKPT_ROOT}}"
 # Explicit BASE_CKPT overrides automatic checkpoint discovery only.
 BASE_CKPT="${BASE_CKPT:-${CKPT_ROOT}/${RUN_NAME}/checkpoints}"
@@ -259,6 +273,9 @@ PY
     if [[ -n "${LIBERO_FIXED_NOISE_CONFIG:-}" ]]; then
       echo "fixed_image_noise_config=$LIBERO_FIXED_NOISE_CONFIG"
     fi
+    if [[ -n "${LIBERO_TASK7_OBJECT_SHIFT_CONFIG:-}" ]]; then
+      echo "fixed_object_shift_config=$LIBERO_TASK7_OBJECT_SHIFT_CONFIG"
+    fi
     printf '%q ' python -u - "${EVAL_ARGS[@]}"
     printf '\n'
     continue
@@ -344,6 +361,12 @@ if os.environ.get("LIBERO_FIXED_NOISE_CONFIG"):
         raise RuntimeError("Fixed Gaussian image noise is incompatible with PLUS/PRO evaluation")
     from lerobot.scripts.libero_fixed_noise import install as install_fixed_noise
     fixed_noise_manifest = install_fixed_noise(module, os.environ["LIBERO_FIXED_NOISE_CONFIG"])
+object_shift_manifest = {}
+if os.environ.get("LIBERO_TASK7_OBJECT_SHIFT_CONFIG"):
+    from lerobot.scripts.pi05_task7_object_shift import install as install_task7_shift
+    object_shift_manifest = install_task7_shift(
+        module, os.environ["LIBERO_TASK7_OBJECT_SHIFT_CONFIG"]
+    )
 original_all = module.eval_policy_all
 original_one = module.run_one
 original_rollout = module.rollout
@@ -381,6 +404,7 @@ manifest = {
     **base_manifest,
     **robustness_manifest,
     **fixed_noise_manifest,
+    **object_shift_manifest,
 }
 manifest_file = output / "resume_manifest.json"
 if manifest_file.exists():

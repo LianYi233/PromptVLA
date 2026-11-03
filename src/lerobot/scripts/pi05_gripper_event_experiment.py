@@ -331,6 +331,33 @@ def fixed_noise_path(args, record):
     return evaluation_root(args, record) / "fixed_image_noise_config.json"
 
 
+def task7_shift_config(args):
+    magnitude = getattr(args, "shift_m", 0.0)
+    if type(magnitude) not in (int, float) or not math.isfinite(magnitude) or magnitude < 0:
+        raise ValueError("--shift-m must be finite and nonnegative")
+    if magnitude == 0:
+        return None
+    from lerobot.scripts.pi05_task7_object_shift import (
+        PROTOCOL as SHIFT_PROTOCOL,
+        validate_config as validate_shift,
+    )
+
+    return validate_shift(
+        {
+            "protocol": SHIFT_PROTOCOL,
+            "task_id": 7,
+            "suite": "libero_10",
+            "shift_m": float(magnitude),
+            "seed": getattr(args, "shift_seed", 20261103),
+            "eval_seed": args.eval_seed,
+        }
+    )
+
+
+def task7_shift_path(args, record):
+    return evaluation_root(args, record) / "fixed_object_shift_config.json"
+
+
 def ensure_noise_config(path, config):
     """Serialize shared protocol creation under a filesystem lock (four GPUs)."""
     import fcntl
@@ -363,6 +390,14 @@ def evaluation_root(args, record):
             Path(base) / "fixed-image-noise"
             / f"scope-{noise['scope']}-sigma-{sigma_label}-seed{noise['seed']}-{fingerprint}"
         )
+    shift = task7_shift_config(args)
+    if shift is not None:
+        fingerprint = hashlib.sha256(json.dumps(shift, sort_keys=True).encode()).hexdigest()[:12]
+        shift_label = f"{shift['shift_m']:.3f}".replace(".", "p")
+        base = (
+            Path(base) / "fixed-object-shift"
+            / f"meters-{shift_label}-seed{shift['seed']}-{fingerprint}"
+        )
     selection = record["selection"]
     identity = hashlib.sha256(json.dumps(record, sort_keys=True).encode()).hexdigest()[:12]
     experiment_name = f"task{selection['task_id']}-ep{selection['episode_index']}-{identity}"
@@ -392,13 +427,26 @@ def evaluate(record, jobs, args):
     audit(record, jobs)
     noise_spec = fixed_noise_config(args)
     noise_path = fixed_noise_path(args, record) if noise_spec else None
+    shift_spec = task7_shift_config(args)
+    shift_path = task7_shift_path(args, record) if shift_spec else None
+    if (noise_spec or shift_spec) and noise_spec and shift_spec:
+        raise ValueError("Cannot combine tabletop displacement and image noise")
     if noise_spec and not args.dry_run:
         ensure_noise_config(noise_path, noise_spec)
+    if shift_spec and not args.dry_run:
+        ensure_noise_config(shift_path, shift_spec)
     if noise_spec:
         print(
             f"Fixed Gaussian image noise: scope={noise_spec['scope']} "
             f"std={noise_spec['std']} seed={noise_spec['seed']} "
             f"eval_seed={noise_spec['eval_seed']} config={noise_path}",
+            flush=True,
+        )
+    if shift_spec:
+        print(
+            f"Task7 fixed object displacement: {shift_spec['shift_m']:.3f}m; "
+            f"seed={shift_spec['seed']}; eval_seed={args.eval_seed}; "
+            f"config={shift_path}",
             flush=True,
         )
     print(
@@ -414,8 +462,8 @@ def evaluate(record, jobs, args):
         env = os.environ.copy()
         # Do not mix result/log roots or a noise manifest from another project.
         for stale in (
-            "LIBERO_FIXED_NOISE_CONFIG", "LIBERO_SELECTED_TASK_ID",
-            "BASE_OUTPUT", "EVAL_LOG_ROOT",
+            "LIBERO_FIXED_NOISE_CONFIG", "LIBERO_TASK7_OBJECT_SHIFT_CONFIG",
+            "LIBERO_SELECTED_TASK_ID", "BASE_OUTPUT", "EVAL_LOG_ROOT",
             "LIBERO_PROGRESS_FD", "LIBERO_PROGRESS_LABEL",
         ):
             env.pop(stale, None)
@@ -423,6 +471,8 @@ def evaluate(record, jobs, args):
             env["LIBERO_SELECTED_TASK_ID"] = str(record["selection"]["task_id"])
         if noise_path:
             env["LIBERO_FIXED_NOISE_CONFIG"] = str(noise_path)
+        if shift_path:
+            env["LIBERO_TASK7_OBJECT_SHIFT_CONFIG"] = str(shift_path)
         for key in ("BASE_CKPT", "BASE_MODEL_PATH", "RUN_PREFIX", "PDET_CASES"):
             env.pop(key, None)
         descriptor = read_json(job["run"] / "gripper_event_experiment.json")
@@ -497,8 +547,10 @@ def read_eval_result(path, selected_task, episodes, *, only_selected=False):
 
 def summarize(record, jobs, args):
     noise_spec = fixed_noise_config(args)
+    shift_spec = task7_shift_config(args)
     results = {}
     corruption_identities = set()
+    object_shift_identities = set()
     for job in jobs:
         path = result_path(job, record, args)
         if noise_spec:
@@ -513,6 +565,19 @@ def summarize(record, jobs, args):
             corruption_identities.add(
                 (applied.get("config_sha256"), applied.get("helper_sha256"))
             )
+        if shift_spec:
+            metadata = read_json(path.parent / "resume_manifest.json")
+            applied = metadata.get("task7_object_shift", {})
+            expected_file = task7_shift_path(args, record)
+            if (
+                applied.get("config") != shift_spec
+                or applied.get("config_sha256") != file_hash(expected_file)
+                or not applied.get("helper_sha256")
+            ):
+                raise ValueError("Task7 object shift protocol does not match the saved evaluation")
+            object_shift_identities.add(
+                (applied["config_sha256"], applied["helper_sha256"])
+            )
         results[job["case"]] = {
             **read_eval_result(
                 path,
@@ -525,6 +590,8 @@ def summarize(record, jobs, args):
         }
     if len(corruption_identities) > 1:
         raise ValueError("Models were evaluated with different noise protocols or implementations")
+    if len(object_shift_identities) > 1:
+        raise ValueError("Models were evaluated with different object-shift implementations")
     contrasts = {}
     if set(results) == set(CASES):
         for metric in ("selected_task_rate", "overall_rate"):
@@ -545,7 +612,10 @@ def summarize(record, jobs, args):
             if selected_task_only(args) else list(range(10))
         ),
         "fixed_observation_noise": noise_spec,
+        "fixed_object_shift": shift_spec,
         "success_rate_scope": (
+            "task7 only, deterministic physical object displacement"
+            if shift_spec else
             "all ten tasks clean; deterministic per-episode policy RNG"
             if noise_spec and noise_spec["std"] == 0
             else "task8 corrupted; other nine tasks clean"
@@ -655,6 +725,16 @@ def main():
         help="Use matched per-episode policy seeding even if --noise-std=0",
     )
     parser.add_argument(
+        "--shift-m", type=float,
+        default=float(os.environ.get("TASK7_OBJECT_SHIFT_M", "0")),
+        help="Deterministic tabletop XY shift magnitude in meters, default 0 (clean)",
+    )
+    parser.add_argument(
+        "--shift-seed", type=int,
+        default=int(os.environ.get("TASK7_OBJECT_SHIFT_SEED", "20261103")),
+        help="Model-independent seed for deterministic task7 object displacement",
+    )
+    parser.add_argument(
         "--noise-std",
         type=float,
         default=float(os.environ.get("GRIPPER_FIXED_NOISE_STD", "0")),
@@ -688,7 +768,11 @@ def main():
             ):
                 raise ValueError("Selected-task-only mode requires task7 additive 1000+200-step preparation")
             if args.noise_std != 0 or args.fixed_eval:
-                raise ValueError("Task7-only evaluation must be clean: --noise-std 0, no --fixed-eval")
+                raise ValueError("Task7-only evaluation requires no image noise or fixed-noise protocol")
+            if args.shift_m > 0 and (args.command not in ("eval", "summarize")):
+                raise ValueError("Task7 object displacement is an evaluation-only setting")
+        elif args.shift_m > 0:
+            raise ValueError("Task7 object displacement requires --only-selected-task")
         # Legacy direct calls may have relied on BASE_OUTPUT as a default.
         # Additive evaluations never inherit that unrelated global variable.
         if (
