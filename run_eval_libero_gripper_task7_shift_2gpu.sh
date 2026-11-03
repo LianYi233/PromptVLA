@@ -25,7 +25,7 @@ if [[ "$has_shift" == false ]]; then
   # Never let a stale TASK7_OBJECT_SHIFT_M from another shell override the
   # preregistered Uniform-only calibration. Explicit --shift-m is the override.
   unset TASK7_OBJECT_SHIFT_M
-  CALIBRATION="${TASK7_SHIFT_CALIBRATION:-/data1/wyn/prompt-work/gripper-event-task7-1200/shift-calibration.json}"
+  CALIBRATION="${TASK7_SHIFT_STRONG_CALIBRATION:-/data1/wyn/prompt-work/gripper-event-task7-1200/shift-calibration-strong.json}"
   if [[ ! -f "$CALIBRATION" ]]; then
     echo "Missing calibrated shift: $CALIBRATION" >&2
     echo "Run python -m lerobot.scripts.pi05_task7_shift_calibrate calibrate first, or pass --shift-m 0.04" >&2

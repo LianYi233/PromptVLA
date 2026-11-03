@@ -24,7 +24,11 @@ TASK_SUITE = "libero_10"
 TARGET_OBJECTS = ("alphabet_soup_1", "cream_cheese_1")
 OTHER_OBJECTS = ("tomato_sauce_1", "ketchup_1", "basket_1")
 DEFAULT_SHIFT_SEED = 20261103
-MAX_SHIFT_M = 0.07
+# Official task7 living-room workspace: 0.70m x 1.60m, at XY=(0, 0).
+# Maintain a conservative 5cm edge margin for object centres.
+MAX_SHIFT_M = 0.14
+TABLE_X_LIMIT_M = 0.30
+TABLE_Y_LIMIT_M = 0.75
 MIN_OBJECT_SEPARATION_M = 0.07
 MAX_ATTEMPTS = 256
 
@@ -81,8 +85,9 @@ def choose_translations(original_poses, config, rollout_seed):
     """Pick exact-radius XY displacements, avoiding close object centers.
 
     Reject draws that bring either target within 7 cm of any task object.
-    The BDDL task's original object locations are far from table edges; a
-    <=7 cm planar translation stays on the same nearby tabletop region.
+    Reject any candidate that leaves the safe tabletop envelope (5 cm
+    edge margin) or crowds another object; this lets the calibrated
+    displacement increase without silently moving an object off-table.
     """
     validate_config(config)
     required = set(TARGET_OBJECTS + OTHER_OBJECTS)
@@ -107,7 +112,11 @@ def choose_translations(original_poses, config, rollout_seed):
                 other: (moved[other][:2] if other in moved else positions[other][:2])
                 for other in positions if other != name
             }
-            if all(
+            on_table = (
+                abs(candidate[0]) <= TABLE_X_LIMIT_M
+                and abs(candidate[1]) <= TABLE_Y_LIMIT_M
+            )
+            if on_table and all(
                 np.linalg.norm(candidate - p) >= MIN_OBJECT_SEPARATION_M
                 for p in other_positions.values()
             ):
@@ -117,7 +126,7 @@ def choose_translations(original_poses, config, rollout_seed):
                 break
         else:
             raise RuntimeError(
-                f"No collision-safe shift for {name} at {config['shift_m']} m, "
+                f"No tabletop-safe shift for {name} at {config['shift_m']} m, "
                 f"episode seed={rollout_seed}; choose a lower displacement"
             )
     return moved

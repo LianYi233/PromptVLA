@@ -18,7 +18,7 @@ silently falling back to a different shift strength.
 
 At a given displacement magnitude, every target is displaced by that
 magnitude (randomized direction, exact radius) and placed at least 7 cm
-from each other object's center. Maximum allowed displacement 7 cm.
+from each other object's center. Maximum allowed displacement 14 cm; the target centres must also remain within a conservative 5 cm margin from the living-room tabletop edges.
 This is a *heuristic* geometry check, not a formal collision-free placement
 guarantee; visually inspect a few perturbed rollouts before drawing
 conclusions. Perturbations use a SHA256→NumPy PCG64 stream derived solely
@@ -42,8 +42,8 @@ evaluated, 10 episodes per model.
 conda activate lerobot
 cd /home/wyn/VLAA/PromptVLA
 git -c core.sshCommand="ssh -p 443" fetch \
-  git@ssh.github.com:LianYi233/PromptVLA.git feat/task7-fixed-object-shift
-git switch -c feat/task7-fixed-object-shift FETCH_HEAD
+  git@ssh.github.com:LianYi233/PromptVLA.git feat/task7-fixed-object-shift-strong
+git switch -c feat/task7-fixed-object-shift-strong FETCH_HEAD
 export PYTHONPATH="$PWD/src:$PWD${PYTHONPATH:+:$PYTHONPATH}"
 ```
 
@@ -52,6 +52,10 @@ after fetching.
 
 ## 2. First calibrate with Uniform ONLY, independent pilot episodes
 
+The first object-shift pilot achieved 9/10 at 2 cm, 7/10 at 4 cm, and
+8/10 at 6 cm. The closest was 70%, above the desired 50%.
+This follow-up tests stronger perturbations (8, 10, 12, 14 cm) and saves
+a NEW record, leaving the earlier pilot untouched.
 The original Uniform and Event each achieved 9/10 clean task7 success.
 A physically plausible shift that gets **close** to 50% cannot be
 guaranteed in advance. Calibrate on **Uniform only**, not by peeking at
@@ -61,15 +65,15 @@ the four final models.
 GPU_ID=1 python -m lerobot.scripts.pi05_task7_shift_calibrate calibrate \
   --gpu 1 --repeat 1 --episodes 10 \
   --pilot-seed 2000 --final-seed 1000 --shift-seed 20261103 \
-  --strengths 0.02,0.04,0.06
+  --strengths 0.08,0.10,0.12,0.14
 ```
 
-This evaluates the **same saved Uniform checkpoint** at 2, 4, 6 cm,
+This evaluates the **same saved Uniform checkpoint** at 8, 10, 12, 14 cm,
 10 pilot episodes each, and writes the full decision and success counts
 to:
 
 ```
-/data1/wyn/prompt-work/gripper-event-task7-1200/shift-calibration.json
+/data1/wyn/prompt-work/gripper-event-task7-1200/shift-calibration-strong.json
 ```
 
 It picks the strength with pilot Uniform success nearest 50% (ties go to
@@ -80,8 +84,8 @@ scale to implausibly large object translations. The pilot seed is 2000;
 the final test seed is 1000, so the final positions and policy
 randomness are not the pilot's exact realization.
 
-To manually choose 4 cm without calibration (if the pilot is too
-expensive), pass `--shift-m 0.04` in the final command. The final
+To manually choose 10 cm without calibration (if the pilot is too
+expensive), pass `--shift-m 0.10` in the final command. The final
 baseline rate must then be measured, not assumed to be 50%.
 
 ## 3. Evaluate four models in EXACTLY two simultaneous pairs
@@ -98,7 +102,7 @@ GPU_IDS=1,3 \
 
 If `--shift-m` is omitted, the two-GPU runner automatically reads the
 calibrated magnitude from the saved record. If calibration has not
-been run, you can explicitly pass e.g. `--shift-m 0.04`.
+been run, you can explicitly pass e.g. `--shift-m 0.10`.
 For both cases the shift seed defaults to 20261103; override with
 `--shift-seed` only if necessary, but keep the same value in every run.
 
@@ -120,7 +124,7 @@ You can also evaluate individual cases with:
 ```bash
 GPU_ID=1 bash run_eval_libero_gripper_task7_shift.sh uniform \
   --repeat 1 --eval-seed 1000 --episodes 10 \
-  --shift-m 0.04 --shift-seed 20261103
+  --shift-m 0.10 --shift-seed 20261103
 ```
 
 Results are segregated from the clean results under:

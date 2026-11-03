@@ -133,7 +133,7 @@ def test_reset_index_independent_of_auto_reset_count():
         shift.init_state_for_episode(999, config(), 10)
 
 
-@pytest.mark.parametrize("magnitude", (-0.02, 0, float("nan"), 0.12))
+@pytest.mark.parametrize("magnitude", (-0.02, 0, float("nan"), 0.16))
 def test_invalid_shift_strength_rejected(magnitude):
     with pytest.raises(ValueError):
         shift.validate_config(config(magnitude))
@@ -184,7 +184,7 @@ def test_eval_root_and_summary_only_task7(tmp_path):
 def test_calibration_strength_selection_and_validation(tmp_path):
     assert calibrate._amplitudes("0.06,0.02,0.04") == (0.02, 0.04, 0.06)
     with pytest.raises(ValueError):
-        calibrate._amplitudes("0.01,0.09")
+        calibrate._amplitudes("0.01,0.16")
     file = tmp_path / "calib.json"
     file.write_text(json.dumps({
         "protocol": calibrate.PROTOCOL,
@@ -212,3 +212,31 @@ def test_two_gpu_shell_evaluates_uniform_event_then_both_time_cases():
     assert "apply_shift(self, shift_config" in env_script
     full_script = (root / "run_eval_libero-full.sh").read_text()
     assert "**object_shift_manifest" in full_script
+
+
+
+def test_stronger_displacement_stays_on_table_and_keeps_vertical_pose():
+    original = poses()
+    first = shift.choose_translations(original, config(0.12), 1012)
+    second = shift.choose_translations(original, config(0.12), 1012)
+    for obj in shift.TARGET_OBJECTS:
+        np.testing.assert_array_equal(first[obj], second[obj])
+        assert np.linalg.norm(first[obj][:2] - original[obj][:2]) == pytest.approx(0.12)
+        assert abs(first[obj][0]) <= shift.TABLE_X_LIMIT_M
+        assert abs(first[obj][1]) <= shift.TABLE_Y_LIMIT_M
+        np.testing.assert_array_equal(first[obj][2:], original[obj][2:])
+
+
+def test_stronger_displacement_rejects_unreachable_workspace():
+    original = poses()
+    original["alphabet_soup_1"][:2] = [0.45, 0.0]
+    with pytest.raises(RuntimeError, match="No tabletop-safe shift"):
+        shift.choose_translations(original, config(0.08), 1001)
+
+
+def test_strong_pilot_is_separate_from_prior_calibration_file():
+    assert calibrate.DEFAULT_CALIBRATION.name == "shift-calibration-strong.json"
+    assert calibrate._amplitudes("0.08,0.10,0.12,0.14") == (
+        0.08, 0.10, 0.12, 0.14
+    )
+    assert shift.MAX_SHIFT_M >= 0.14

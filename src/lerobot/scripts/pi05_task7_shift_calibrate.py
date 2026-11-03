@@ -18,7 +18,7 @@ from lerobot.scripts.pi05_task7_object_shift import DEFAULT_SHIFT_SEED, MAX_SHIF
 
 PROTOCOL = "task7-shift-uniform-pilot-v1"
 DEFAULT_CALIBRATION = Path(
-    "/data1/wyn/prompt-work/gripper-event-task7-1200/shift-calibration.json"
+    "/data1/wyn/prompt-work/gripper-event-task7-1200/shift-calibration-strong.json"
 )
 DEFAULT_PREPARATION = Path(
     "/data1/wyn/prompt-work/gripper-event-task7-1200/additive"
@@ -185,7 +185,7 @@ def main():
     parser.add_argument("--pilot-seed", type=int, default=2000)
     parser.add_argument("--final-seed", type=int, default=1000)
     parser.add_argument("--shift-seed", type=int, default=DEFAULT_SHIFT_SEED)
-    parser.add_argument("--strengths", default="0.02,0.04,0.06")
+    parser.add_argument("--strengths", default="0.08,0.10,0.12,0.14")
     args = parser.parse_args()
     try:
         if args.command == "selected":

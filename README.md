@@ -38,7 +38,7 @@ D/E/F 新种子重复：见 [D1/E1/F1、D2/E2/F2 一次启动说明](examples/an
 
 两样本顺序对照：见 [同一对简单/困难观测，交换两个3000步阶段](examples/analysis/README_pi05_two_frame.md)。复用评分缓存，选同 task/episode 的两个完整、不重叠动作窗口；E2H/H2E 各训练6000步、曝光各半，固定帧与噪声配对，仅训练VLM2+完整action expert。四卡并行两组，记录两个训练样本各自的固定损失，只保存最终006000。
 
-LIBERO-long task7 物体位置扰动（2/4/6cm Uniform 标定，四模型双卡两阶段）：[Task7 Fixed Object Shift](examples/analysis/README_task7_fixed_object_shift.md)。
+LIBERO-long task7 物体位置增强扰动（第一轮 2/4/6cm 未达 50%，第二轮 8/10/12/14cm Uniform 标定，四模型双卡两阶段）：[Task7 Fixed Object Shift](examples/analysis/README_task7_fixed_object_shift.md)。
 
 LIBERO-long task7 单示范 1200 步（1000 步基础 + 200 步额外采样）、只评测 task7/10 episodes 的四组干净对照：[Task7 1200-step Experiment](examples/analysis/README_pi05_gripper_task7.md)。
 
