@@ -72,6 +72,70 @@ export PYTHONPATH="$PWD/src:$PWD${PYTHONPATH:+:$PYTHONPATH}"
 If already on the branch, use `git switch` followed by
 `git merge --ff-only FETCH_HEAD` instead.
 
+## 1b. Figure 0 — repeat ONE action 50 times (CPU-only mechanism illustration)
+
+Before evaluating actual action predictions, isolate the temporal *input*
+channel. Create a fixed **7-D normalized action vector** and copy it to all
+**50 future positions**. No camera frames, task description, Gaussian Flow
+noise, changed action targets, model training, or robot actions are involved.
+Only the position in the chunk varies.
+
+```bash
+# Labelled illustration to check the plotting pipeline; NOT research evidence.
+bash run_visualize_task7_constant_action.sh --illustrative \
+  --output /tmp/task7-constant-action-illustration
+
+# Automatically select the existing 1000-step time_input checkpoint from the
+# saved task7 experimental plan (NOT the original RoPE-only checkpoint).
+bash run_visualize_task7_constant_action.sh --from-task7-plan
+
+# Alternatively, explicitly supply a trained Time-Input checkpoint directory:
+bash run_visualize_task7_constant_action.sh \
+  --checkpoint /path/to/time_input/checkpoints/001000/pretrained_model
+
+python -m pytest -q tests/scripts/test_pi05_task7_constant_action.py
+```
+
+The trained mode only reads `config.json` and three tensors from
+`model.safetensors`: `model.action_in_proj.weight`, its bias, and
+`model.action_time_encoder.weight`. It reuses the **exact project's**
+`RelativeActionTimeEncoding` module with the checkpoint's basis, learned
+projection, frequencies, and gain mode. It does **not** load the 3B VLA,
+require GPU, or run inference. The seven action values can be changed with
+`--action 0.1,-0.1,0.05,0,0,0,0.5` (illustrative normalized values, not
+physical robot commands); they are zero-padded to the policy's original
+`max_action_dim` before the real input projection. For physical/global_dt checkpoints, `--delta-t`
+sets the real action interval; the default is `1/fps`.
+`--from-task7-plan` uses the same `--directory`, `--output-root`, and
+`--repeat` settings as the established timepath launcher (defaults to repeat 1).
+
+**Figure 0:** `fig00_constant_action_50.png/.svg`, with four panels:
+
+1. The 50 rows of exactly identical actions (action dimensions 0–6).
+2. PCA of 50 time-conditioned input embeddings: the RoPE-only / Zero
+   **input** lies at one point; the learned Time-Input features can form a
+   position-dependent trajectory. Color indicates the action index.
+3. Pairwise cosine-similarity matrix of the *learned temporal residuals*.
+4. L2 distance from the first action embedding for RoPE-only input,
+   Time-Input Correct, and Time-Input Reversed (same weights, reverse order).
+
+The file `constant_action_50_summary.json` records measured distances,
+whether a signal was detected, checkpoint/weight fingerprints and caveats;
+`constant_action_50_positions.csv` records 50 per-position measurements;
+`constant_action_50_embeddings.npz` stores the actual action/input/temporal
+vectors for further figures. If the learned temporal projection is zero or
+collapses positions, the code reports **no detected signal**, rather than
+pretending that the encoding works.
+
+**Critical interpretation:** RoPE rotates Q/K later in the attention
+mechanism, so an identical RoPE-only *expert input* does **not** mean RoPE
+is incapable of distinguishing positions. This constant-action test can
+prove that the additional **Time-Input path** introduces position-dependent
+representations, but it cannot prove any advantage in action prediction.
+The "RoPE-only / Zero" input is the **same Time-Input checkpoint with its
+temporal residual bypassed**, not an independently trained RoPE checkpoint.
+Use the held-out Correct/Zero/Reversed Flow-MSE probe in section 3 for that.
+
 ## 2. Run tests, then make ACTUAL rollout evidence — CPU only
 
 ```bash
@@ -157,6 +221,11 @@ GPU_ID=0 bash run_analyze_task7_time_evidence.sh \
 
 ```
 /data1/wyn/chkpt/2601-lerobot/PromptVLA/analysis/task7-rope-time-input/
+    fig00_constant_action_50.png
+    fig00_constant_action_50.svg
+    constant_action_50_summary.json
+    constant_action_50_positions.csv
+    constant_action_50_embeddings.npz
     fig01_paired_task7_outcomes.png
     fig01_paired_task7_outcomes.svg
     fig02_learned_time_residual.png
