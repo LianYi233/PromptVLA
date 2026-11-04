@@ -151,6 +151,24 @@ if [[ -n "${LIBERO_FIXED_NOISE_CONFIG:-}" ]]; then
   fi
 fi
 
+if [[ -n "${LIBERO_TASK7_DUALSEED_SHIFT_CONFIG:-}" ]]; then
+  if [[ -n "${LIBERO_TASK7_OBJECT_SHIFT_CONFIG:-}" ]]; then
+    echo "Dual-seed and legacy task7 object-shift configurations are mutually exclusive" >&2
+    exit 2
+  fi
+  if [[ "$ENV_TYPE" != libero || "$TASKS" != libero_10 \
+        || "$LIBERO_SELECTED_TASK_ID" != 7 \
+        || -n "${LIBERO_ROBUSTNESS_MANIFEST:-}" \
+        || -n "${LIBERO_FIXED_NOISE_CONFIG:-}" ]]; then
+    echo "Dual-seed task7 requires standard LIBERO-long task7, without noise or robustness fork" >&2
+    exit 2
+  fi
+  if [[ "$DRY_RUN" != true && ! -f "$LIBERO_TASK7_DUALSEED_SHIFT_CONFIG" ]]; then
+    echo "Missing dual-seed shift configuration: $LIBERO_TASK7_DUALSEED_SHIFT_CONFIG" >&2
+    exit 2
+  fi
+fi
+
 if [[ -n "${LIBERO_TASK7_OBJECT_SHIFT_CONFIG:-}" ]]; then
   if [[ "$ENV_TYPE" != libero || "$TASKS" != libero_10 \
         || "$LIBERO_SELECTED_TASK_ID" != 7 \
@@ -362,7 +380,13 @@ if os.environ.get("LIBERO_FIXED_NOISE_CONFIG"):
     from lerobot.scripts.libero_fixed_noise import install as install_fixed_noise
     fixed_noise_manifest = install_fixed_noise(module, os.environ["LIBERO_FIXED_NOISE_CONFIG"])
 object_shift_manifest = {}
-if os.environ.get("LIBERO_TASK7_OBJECT_SHIFT_CONFIG"):
+dualseed_shift_manifest = {}
+if os.environ.get("LIBERO_TASK7_DUALSEED_SHIFT_CONFIG"):
+    from lerobot.scripts.pi05_task7_dualseed_shift import install as install_dualseed_shift
+    dualseed_shift_manifest = install_dualseed_shift(
+        module, os.environ["LIBERO_TASK7_DUALSEED_SHIFT_CONFIG"]
+    )
+elif os.environ.get("LIBERO_TASK7_OBJECT_SHIFT_CONFIG"):
     from lerobot.scripts.pi05_task7_object_shift import install as install_task7_shift
     object_shift_manifest = install_task7_shift(
         module, os.environ["LIBERO_TASK7_OBJECT_SHIFT_CONFIG"]
@@ -405,6 +429,7 @@ manifest = {
     **robustness_manifest,
     **fixed_noise_manifest,
     **object_shift_manifest,
+    **dualseed_shift_manifest,
 }
 manifest_file = output / "resume_manifest.json"
 if manifest_file.exists():

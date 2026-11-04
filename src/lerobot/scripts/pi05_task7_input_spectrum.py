@@ -262,6 +262,8 @@ def _eval_args(args, seed, *, prior=False):
         eval_root=(getattr(args, "control_eval_root", original.DEFAULT_EVAL)
                    if prior else args.eval_root),
         eval_seed=seed, shift_m=args.shift_m, shift_seed=args.shift_seed,
+        scene_seed=getattr(args, "scene_seed", None),
+        policy_seed=getattr(args, "policy_seed", None),
         episodes=10, repeat=args.repeat,
     )
 
@@ -299,6 +301,11 @@ def run_eval_job(job, record, args, seed, gpu, *, prior=False):
             "--gpu", str(gpu),
         ]
     )
+    if getattr(args, "scene_seed", None) is not None:
+        cmd.extend([
+            "--scene-seed", str(args.scene_seed),
+            "--policy-seed", str(args.policy_seed),
+        ])
     env = os.environ.copy()
     # Keep all physical CUDA indices visible: the existing LIBERO evaluator
     # chooses torch.device('cuda:<GPU_ID>') itself. Masking visibility to a
@@ -332,6 +339,7 @@ def eval_one(record, job, args, seed):
         "LIBERO_SELECTED_TASK_ID", "LIBERO_BENCHMARK", "LIBERO_ROBUSTNESS_MANIFEST",
         "BASE_OUTPUT", "EVAL_LOG_ROOT", "BASE_CKPT", "BASE_MODEL_PATH",
         "RUN_PREFIX", "PDET_CASES", "PI05_CADENCE_PLAN",
+        "LIBERO_TASK7_DUALSEED_SHIFT_CONFIG",
     ):
         env.pop(key, None)
     env.update(
@@ -344,11 +352,15 @@ def eval_one(record, job, args, seed):
         LOG_ROOT=str(args.log_root.resolve()),
         TRAIN_ACTION_EXPERT="true", VLM_PROMPT_TOKENS="2",
         CHECKPOINT_STEP="1000", LIBERO_SELECTED_TASK_ID="7",
-        LIBERO_TASK7_OBJECT_SHIFT_CONFIG=str(config_path.resolve()),
         EVAL_SEED=str(seed), EPISODES_PER_TASK="10",
         GPU_ID=str(args.gpu), DRY_RUN="true" if args.dry_run else "false",
         PROGRESS="true",
     )
+    env[
+        "LIBERO_TASK7_DUALSEED_SHIFT_CONFIG"
+        if getattr(args, "scene_seed", None) is not None
+        else "LIBERO_TASK7_OBJECT_SHIFT_CONFIG"
+    ] = str(config_path.resolve())
     cmd = ["bash", str(ROOT / "run_eval_libero_vlm_only.sh"),
            "base", "trained", "libero_10", "0"]
     subprocess.run(cmd, cwd=ROOT, env={**env, "DRY_RUN": "true"}, check=True)
@@ -362,7 +374,9 @@ def _checked_result(job, record, args, seed, *, prior=False):
     cfg = original.shift_config(root)
     config_path = original.evaluation_config_path(root, record)
     manifest = previous.read_json(_result(job, record, args, seed, prior=prior).parent / "resume_manifest.json")
-    shifted = manifest.get("task7_object_shift", {})
+    shifted = manifest.get(
+        "task7_dualseed_shift" if "scene_seed" in cfg else "task7_object_shift", {}
+    )
     # The underlying evaluator's own resume manifest records all checkpoint
     # file sizes/mtime_ns. Verify that an old eval is still for these exact
     # weights; never silently reuse results for a changed model.
@@ -565,6 +579,8 @@ def main():
     parser.add_argument("--eval-seed",type=int,default=3000)
     parser.add_argument("--shift-m",type=float,default=0.12)
     parser.add_argument("--shift-seed",type=int,default=20261103)
+    parser.add_argument("--scene-seed",type=int,default=None)
+    parser.add_argument("--policy-seed",type=int,default=None)
     parser.add_argument("--episodes",type=int,default=10)
     parser.add_argument("--dry-run",action="store_true",
                         default=os.environ.get("DRY_RUN","false")=="true")
@@ -581,6 +597,7 @@ def main():
             or not all(value.isdecimal() for value in gpus)
             or any(seed < 0 for seed in args.seeds)
             or args.shift_m < 0 or args.shift_m > 0.14
+            or ((args.scene_seed is None) != (args.policy_seed is None))
         ):
             raise ValueError("Expected 10 episodes, two distinct GPUs and shift_m in [0, 0.14]")
         if args.command=="train":

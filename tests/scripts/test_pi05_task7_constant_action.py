@@ -121,6 +121,9 @@ def test_figure_and_machine_readable_data_are_generated_from_actual_inputs(tmp_p
                                      encoder, "index")
     report = json.loads(report_path.read_text())
     assert report["source"]["kind"] == "illustrative_untrained"
+    assert report["independently_trained_rope_loaded"] is False
+    assert report["reversed_control_is_input_permutation"] is True
+    assert report["measurement_location"] == "after_action_projection_before_transformer"
     assert report["metrics"]["all_50_actions_identical"]
     assert len(report["figures"]) == 2
     assert all((tmp_path / path.split("/")[-1]).stat().st_size > 500
@@ -133,3 +136,4 @@ def test_figure_and_machine_readable_data_are_generated_from_actual_inputs(tmp_p
     assert np.max(csv[:, 3]) == pytest.approx(
         report["metrics"]["correct_max_l2_difference_from_first"], rel=1e-6
     )
+

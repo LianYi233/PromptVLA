@@ -1,5 +1,11 @@
 # Why a pretrained VLA's RoPE may benefit from an Action-Input Time Residual
 
+**Integrated workflow:** see [Task7 training → evaluation → time-alignment figures](README_task7_train_eval.md).
+The current branch adds `--comparison-json` for dual-seed outcomes, phase-spread
+non-training windows, multiple matched Flow times/noise seeds, and
+`fig04_time_alignment_evidence.png/.svg`. The default probe is a prespecified
+grid; the single `--flow-time` / `--noise-seed` examples below remain small diagnostics.
+
 **Scope:** Mechanism research for the existing PI0.5 1000-update LIBERO-long
 task7 study. This code does NOT train any new models. It analyzes saved
 per-episode outcomes and an existing trained Time-Input checkpoint, and
@@ -63,9 +69,9 @@ non-equivalence of token-index position and true elapsed time.
 cd /home/wyn/VLAA/PromptVLA
 git -c core.sshCommand="ssh -p 443" fetch \
   git@ssh.github.com:LianYi233/PromptVLA.git \
-  feat/task7-time-rope-mechanism-visuals
+  feat/task7-constant-action-50
 
-git switch -c feat/task7-time-rope-mechanism-visuals FETCH_HEAD
+git switch -c feat/task7-constant-action-50 FETCH_HEAD
 export PYTHONPATH="$PWD/src:$PWD${PYTHONPATH:+:$PYTHONPATH}"
 ```
 
@@ -112,11 +118,11 @@ sets the real action interval; the default is `1/fps`.
 **Figure 0:** `fig00_constant_action_50.png/.svg`, with four panels:
 
 1. The 50 rows of exactly identical actions (action dimensions 0–6).
-2. PCA of 50 time-conditioned input embeddings: the RoPE-only / Zero
+2. PCA of 50 time-conditioned input embeddings: the same-checkpoint Zero
    **input** lies at one point; the learned Time-Input features can form a
    position-dependent trajectory. Color indicates the action index.
 3. Pairwise cosine-similarity matrix of the *learned temporal residuals*.
-4. L2 distance from the first action embedding for RoPE-only input,
+4. L2 distance from the first action embedding for the same-checkpoint residual-off input,
    Time-Input Correct, and Time-Input Reversed (same weights, reverse order).
 
 The file `constant_action_50_summary.json` records measured distances,
@@ -264,3 +270,4 @@ without further controlled evidence.
 The frequency aliasing of the separate 0.1–10 Hz *additive Fourier
 feature bank* at 10 FPS is an issue of that supplemental module,
 not evidence that pretrained Gemma RoPE itself aliases at 5 Hz.
+

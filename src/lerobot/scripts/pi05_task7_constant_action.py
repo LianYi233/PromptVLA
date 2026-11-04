@@ -250,9 +250,9 @@ def save_figure(data: dict, out: Path, *, source_kind: str):
     ax.plot(xy[:, 0], xy[:, 1], color="#64748b", alpha=0.55, lw=1)
     scatter = ax.scatter(xy[:, 0], xy[:, 1], c=steps, cmap="viridis", s=28, zorder=3)
     ax.scatter([zero_xy[0]], [zero_xy[1]], c="#d33f49", marker="x", s=100,
-               linewidths=2.2, label="RoPE-only / zero input")
-    ax.annotate("t=0", xy[0], xytext=(5, 7), textcoords="offset points")
-    ax.annotate("t=49", xy[-1], xytext=(5, 7), textcoords="offset points")
+               linewidths=2.2, label="Same checkpoint: time residual off")
+    ax.annotate("j=0", xy[0], xytext=(5, 7), textcoords="offset points")
+    ax.annotate("j=49", xy[-1], xytext=(5, 7), textcoords="offset points")
     ax.set(title="B. Input-embedding PCA (colored by position)",
            xlabel="Time-residual PC1", ylabel="Time-residual PC2")
     ax.legend(loc="best", fontsize=8)
@@ -269,7 +269,7 @@ def save_figure(data: dict, out: Path, *, source_kind: str):
 
     ax = axes[1, 1]
     for key, label, style in (
-        ("rope_input", "RoPE-only input (= Zero)", "--"),
+        ("rope_input", "Same checkpoint: time residual off", "--"),
         ("correct", "Time-Input: correct order", "-"),
         ("reversed", "Time-Input: reversed order", ":"),
     ):
@@ -285,8 +285,8 @@ def save_figure(data: dict, out: Path, *, source_kind: str):
                "ILLUSTRATIVE only — untrained deterministic weights")
     fig.suptitle(f"Constant-action control (H=50) | {caption}", fontsize=14)
     fig.text(0.5, 0.009,
-             "The RoPE-only curve refers ONLY to expert INPUT embeddings; "
-             "RoPE still encodes position later in Q/K attention. No action prediction is measured.",
+             "Same Time-Input checkpoint, before Transformer/RoPE. Reversed only reorders input vectors. "
+             "This figure measures injection, not prediction accuracy.",
              ha="center", va="bottom", fontsize=9)
     paths = []
     for suffix in ("png", "svg"):
@@ -322,12 +322,18 @@ def save_results(out: Path, data: dict, summary: dict, source: dict, encoder, ba
         "min_frequency_hz": encoder.min_frequency_hz,
         "max_frequency_hz": encoder.max_frequency_hz,
         "gain_mode": encoder.gain_mode,
+        "measurement_location": "after_action_projection_before_transformer",
+        "zero_reference": "same Time-Input checkpoint with extra temporal residual disabled",
+        "independently_trained_rope_loaded": False,
+        "reversed_control_is_input_permutation": True,
         "metrics": summary,
         "figures": figures,
         "data_files": [str(csv), str(npz)],
         "interpretation_limit": (
-            "RoPE-only has identical ACTION INPUTS, but still has positional "
-            "Q/K rotations downstream. This probe checks time-path injection, "
+            "The disabled-residual reference uses the SAME Time-Input checkpoint, "
+            "not an independently trained RoPE model. RoPE still acts downstream. "
+            "Correct/Reversed are the same vectors in different orders; their "
+            "input geometry cannot establish which predicts better. This probe checks injection, "
             "not improved action prediction or task success. Use the held-out "
             "Correct/Zero/Reversed Flow probe for prediction sensitivity."
         ),
@@ -391,3 +397,4 @@ def main(argv=None):
 
 if __name__ == "__main__":
     main()
+

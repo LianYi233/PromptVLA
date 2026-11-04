@@ -196,6 +196,19 @@ def audit(record, jobs):
 
 
 def shift_config(args):
+    scene_seed = getattr(args, "scene_seed", None)
+    policy_seed = getattr(args, "policy_seed", None)
+    if (scene_seed is None) != (policy_seed is None):
+        raise ValueError("Supply both --scene-seed and --policy-seed, or neither")
+    if scene_seed is not None:
+        from lerobot.scripts.pi05_task7_dualseed_shift import (
+            PROTOCOL as DUAL_PROTOCOL, validate_config as validate_dual,
+        )
+        return validate_dual({
+            "protocol": DUAL_PROTOCOL, "task_id": 7, "suite": "libero_10",
+            "shift_m": float(args.shift_m), "scene_seed": scene_seed,
+            "policy_seed": policy_seed, "eval_seed": args.eval_seed,
+        })
     return validate_shift({
         "protocol": SHIFT_PROTOCOL, "task_id": 7, "suite": "libero_10",
         "shift_m": float(args.shift_m),
@@ -207,6 +220,14 @@ def evaluation_root(args, record):
     cfg = shift_config(args)
     identity = hashlib.sha256(json.dumps(record, sort_keys=True).encode()).hexdigest()[:12]
     shift_hash = hashlib.sha256(json.dumps(cfg, sort_keys=True).encode()).hexdigest()[:12]
+    if "scene_seed" in cfg:
+        return (
+            args.eval_root / "fixed-object-shift-dualseed"
+            / f"meters-{cfg['shift_m']:.3f}-scene{cfg['scene_seed']}"
+            / f"policy{cfg['policy_seed']}-{shift_hash}"
+            / f"task7-ep{record['selection']['episode_index']}-{identity}"
+            / f"r{args.repeat}-init{args.eval_seed}-n{args.episodes}-task7-only"
+        )
     return (
         args.eval_root / "fixed-object-shift"
         / f"meters-{cfg['shift_m']:.3f}-seed{cfg['seed']}-{shift_hash}"
@@ -243,6 +264,7 @@ def evaluate(record, jobs, args):
         env = os.environ.copy()
         for key in (
             "LIBERO_FIXED_NOISE_CONFIG", "LIBERO_TASK7_OBJECT_SHIFT_CONFIG",
+            "LIBERO_TASK7_DUALSEED_SHIFT_CONFIG",
             "LIBERO_SELECTED_TASK_ID", "LIBERO_ROBUSTNESS_MANIFEST", "LIBERO_BENCHMARK",
             "BASE_OUTPUT", "EVAL_LOG_ROOT", "BASE_CKPT", "BASE_MODEL_PATH",
             "RUN_PREFIX", "PDET_CASES",
@@ -258,11 +280,14 @@ def evaluate(record, jobs, args):
             LOG_ROOT=str(args.log_root.resolve()),
             TRAIN_ACTION_EXPERT="true", VLM_PROMPT_TOKENS="2",
             CHECKPOINT_STEP="1000", LIBERO_SELECTED_TASK_ID="7",
-            LIBERO_TASK7_OBJECT_SHIFT_CONFIG=str(path.resolve()),
             EVAL_SEED=str(args.eval_seed), EPISODES_PER_TASK=str(args.episodes),
             GPU_ID=str(args.gpu), DRY_RUN="true" if args.dry_run else "false",
             PROGRESS="true",
         )
+        env[
+            "LIBERO_TASK7_DUALSEED_SHIFT_CONFIG"
+            if "scene_seed" in cfg else "LIBERO_TASK7_OBJECT_SHIFT_CONFIG"
+        ] = str(path.resolve())
         cmd = ["bash", str(ROOT / "run_eval_libero_vlm_only.sh"), "base", "trained", "libero_10", "0"]
         subprocess.run(cmd, env={**env, "DRY_RUN": "true"}, cwd=ROOT, check=True)
         commands.append((job, cmd, env))
@@ -288,7 +313,9 @@ def summarize(record, jobs, args):
     for job in jobs:
         info_path = result_path(job, record, args)
         manifest = previous.read_json(info_path.parent / "resume_manifest.json")
-        shifted = manifest.get("task7_object_shift", {})
+        shifted = manifest.get(
+            "task7_dualseed_shift" if "scene_seed" in cfg else "task7_object_shift", {}
+        )
         if shifted.get("config") != cfg or shifted.get("config_sha256") != sha:
             raise ValueError(f"{job['case']} was evaluated with another shift config")
         if not shifted.get("helper_sha256"):
@@ -377,6 +404,8 @@ def main():
     parser.add_argument("--episodes", type=int, default=10)
     parser.add_argument("--shift-m", type=float, default=0.12)
     parser.add_argument("--shift-seed", type=int, default=20261103)
+    parser.add_argument("--scene-seed", type=int, default=None)
+    parser.add_argument("--policy-seed", type=int, default=None)
     parser.add_argument("--dry-run", action="store_true", default=os.environ.get("DRY_RUN", "false") == "true")
     args = parser.parse_args()
     try:
