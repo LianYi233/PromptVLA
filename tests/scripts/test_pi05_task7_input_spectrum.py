@@ -296,3 +296,15 @@ def test_real_training_shell_accepts_optimised_spectral_gain_flags(tmp_path):
     for flag in cmd[4:]:
         assert flag in result.stdout
     assert "--steps=1000" in result.stdout
+
+
+def test_new_shift_seed_configs_precreated_before_gpu_parallelism(tmp_path):
+    args=model_args(tmp_path)
+    rec=record()
+    spectra.prepare_shift_configs(rec,args,6000)
+    for prior in (False,True):
+        cfg=spectra._eval_args(args,6000,prior=prior)
+        saved=original.evaluation_config_path(cfg,rec)
+        assert saved.is_file()
+        assert json.loads(saved.read_text()) == original.shift_config(cfg)
+    spectra.prepare_shift_configs(rec,args,6000)

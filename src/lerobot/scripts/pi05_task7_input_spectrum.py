@@ -501,6 +501,18 @@ def _run_pair(records, args, seed):
                 task.result()
 
 
+def prepare_shift_configs(record, args, seed):
+    """Write both physics configs once, before parallel workers begin.
+
+    Without this, two processes can race in save_record(open('x'))
+    for a new eval seed.
+    """
+    for prior in (True, False):
+        eva = _eval_args(args, seed, prior=prior)
+        path = original.evaluation_config_path(eva, record)
+        previous.ensure_noise_config(path, original.shift_config(eva))
+
+
 def run(args, record, new_jobs, old_jobs):
     args.record=record
     audit_cross_runs(record, old_jobs, new_jobs)
@@ -508,6 +520,7 @@ def run(args, record, new_jobs, old_jobs):
     summaries = {}
     for seed in args.seeds:
         print(f"\nEvaluating 5 matched policies at seed {seed}", flush=True)
+        prepare_shift_configs(record,args,seed)
         _run_pair(work, args, seed)
         summaries[seed]=summarize_seed(record,args,seed,old_jobs,new_jobs)
     pooled,n=print_pooled(summaries)
