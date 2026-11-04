@@ -4,8 +4,9 @@ No checkpoint weights, MuJoCo simulator, online service, or GPU is used.
 """
 
 import json
+import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import pytest
@@ -13,6 +14,73 @@ import torch
 
 from lerobot.policies.pi05.action_time import RelativeActionTimeEncoding
 from lerobot.scripts import pi05_task7_time_evidence as evidence
+
+
+@pytest.mark.parametrize("timed", [False, True], ids=["rope", "time_input"])
+def test_probe_loader_reads_real_serialized_pi05_config(monkeypatch, tmp_path, timed):
+    """Exercise real draccus decoding; only GPU weights and tokenization are stubbed."""
+    import lerobot.policies as policies
+    from lerobot.configs.types import FeatureType, PolicyFeature
+    from lerobot.policies.pi05.configuration_pi05 import PI05Config
+
+    saved_config = PI05Config(
+        device="cpu", train_action_expert=True, num_vlm_prompt_tokens=2,
+        num_prompt_tokens=0, cabo_enabled=False, next_action_pretrain_steps=0,
+        next_action_bridge_steps=0, action_time_encoding=timed,
+        action_time_encoding_fps=10.0, compile_model=True, gradient_checkpointing=True,
+        output_features={"action": PolicyFeature(type=FeatureType.ACTION, shape=(7,))},
+    )
+    checkpoint = tmp_path / "pretrained_model"
+    saved_config.save_pretrained(checkpoint)
+    config_path = checkpoint / "config.json"
+    original_bytes = config_path.read_bytes()
+    assert json.loads(original_bytes)["type"] == "pi05"
+    tokenizer = tmp_path / "tokenizer"
+    tokenizer.mkdir()
+    seen = {}
+
+    class WeightlessPolicy(torch.nn.Module):
+        pass
+
+    policy = WeightlessPolicy()
+    processor = object()
+
+    def load_weights(path, *, config, **kwargs):
+        seen.update(checkpoint=path, config=config, weight_options=kwargs)
+        return policy
+
+    def make_processors(**kwargs):
+        seen["processor_options"] = kwargs
+        return processor, None
+
+    modeling = ModuleType("lerobot.policies.pi05.modeling_pi05")
+    modeling.PI05Policy = SimpleNamespace(from_pretrained=load_weights)
+    monkeypatch.setitem(sys.modules, modeling.__name__, modeling)
+    monkeypatch.setattr(policies, "make_pre_post_processors", make_processors, raising=False)
+
+    loaded_policy, loaded_processor = evidence._load_policy_and_processor(
+        checkpoint, tokenizer, torch.device("cpu")
+    )
+    config = seen["config"]
+    assert isinstance(config, PI05Config)
+    assert config.action_time_encoding is timed
+    assert config.action_time_encoding_fps == 10.0
+    assert config.output_features["action"] == saved_config.output_features["action"]
+    assert config.num_vlm_prompt_tokens == 2
+    assert config.device == "cpu"
+    assert config.tokenizer_name == str(tokenizer.resolve())
+    assert not config.compile_model and not config.gradient_checkpointing
+    assert seen["checkpoint"] == checkpoint.resolve()
+    assert seen["weight_options"] == {"local_files_only": True, "strict": True}
+    assert seen["processor_options"]["policy_cfg"] is config
+    assert seen["processor_options"]["preprocessor_overrides"] == {
+        "device_processor": {"device": "cpu"},
+        "tokenizer_processor": {"tokenizer_name": str(tokenizer.resolve())},
+    }
+    assert loaded_policy is policy and not policy.training
+    assert loaded_processor is processor
+    # The checkpoint fingerprint must remain valid for existing eval caches.
+    assert config_path.read_bytes() == original_bytes
 
 
 def test_paired_outcomes_with_crossed_successes():

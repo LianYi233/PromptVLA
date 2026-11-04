@@ -30,6 +30,18 @@ GPU_IDS=0,1 bash run_task7_train_eval.sh --repeat 1 --reuse-existing
 
 复用前会检查训练计划、训练日志中的随机流与模型配置。缺少最终 checkpoint 的不完整训练目录不会被覆盖。已有闭环评测也必须通过原有模型/扰动清单校验才能复用。
 
+### 从机制绘图阶段的配置加载报错恢复
+
+若旧版在 `pi05_task7_time_evidence` 中报出 ``The fields `type` are not valid for PI05Config``，这是离线探针的配置解析入口错误。checkpoint 中的 `"type": "pi05"` 是正常的类型标记；修复版通过 `PreTrainedConfig` 注册表读取，再检查模型类型。不要删除该字段或修改 checkpoint，否则会影响已有评测的指纹校验。
+
+更新分支后，在相同环境和相同参数下重新执行：
+
+```bash
+GPU_IDS=0,1 bash run_task7_train_eval.sh --repeat 1 --skip-training
+```
+
+流程会重新审计现有模型、校验并复用已经完成的闭环评测，然后重新生成常量动作图和完整模型机制图。无需重新训练、删除评测缓存或更换 repeat。只有全部机制分析产物生成后，`pipeline_state.json` 才会标记为完成。
+
 ## 实际执行顺序
 
 1. 检查并记录固定实验设置。
@@ -160,4 +172,4 @@ python -m pytest -q \
   tests/scripts/test_pi05_task7_dualseed.py
 ```
 
-这些 CPU 测试验证调度顺序、失败停止、checkpoint 选择、阶段采样、时间干预、按示教聚合及数据驱动绘图。完整 3B 模型、数据视频读取、DDP 训练和 MuJoCo 闭环评测仍需要服务器环境。
+这些 CPU 测试验证真实 PI05 配置的保存/解析、调度顺序、失败停止、checkpoint 选择、阶段采样、时间干预、按示教聚合及数据驱动绘图。配置回归测试使用真实 draccus 解析器，仅替换大模型权重和 tokenizer 加载。完整 3B 模型、数据视频读取、DDP 训练和 MuJoCo 闭环评测仍需要服务器环境。

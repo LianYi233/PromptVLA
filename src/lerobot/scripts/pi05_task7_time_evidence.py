@@ -351,16 +351,24 @@ def time_counterfactual(encoder, intervention):
 
 
 def _load_policy_and_processor(checkpoint, tokenizer, device):
-    from lerobot.policies import make_pre_post_processors
+    from lerobot.configs.policies import PreTrainedConfig
     from lerobot.policies.pi05.configuration_pi05 import PI05Config
-    from lerobot.policies.pi05.modeling_pi05 import PI05Policy
 
     checkpoint=Path(checkpoint).resolve(strict=True)
-    config=PI05Config.from_pretrained(checkpoint)
+    # Saved configs include the ChoiceRegistry discriminator ("type": "pi05").
+    # Decode through the registry base, as PI05Policy.from_pretrained does;
+    # decoding directly as PI05Config treats "type" as an unknown dataclass field.
+    config=PreTrainedConfig.from_pretrained(checkpoint, local_files_only=True)
+    if not isinstance(config, PI05Config):
+        raise ValueError(f"Expected a PI05 checkpoint at {checkpoint}, got {config.type!r}")
     config.device=str(device)
     config.tokenizer_name=str(Path(tokenizer).resolve(strict=True))
     config.compile_model=False
     config.gradient_checkpointing=False
+
+    from lerobot.policies import make_pre_post_processors
+    from lerobot.policies.pi05.modeling_pi05 import PI05Policy
+
     policy=PI05Policy.from_pretrained(
         checkpoint, config=config, local_files_only=True, strict=True
     ).to(device).eval()
