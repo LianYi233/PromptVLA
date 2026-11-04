@@ -90,6 +90,12 @@ class PI05Config(PreTrainedConfig):
     # Optional variable-cadence experiment: index, one global sampling interval,
     # or per-action physical offsets j*delta_t. Existing checkpoints default to index.
     action_time_basis: str = "index"
+    # Input-time residual spectral / amplitude study (legacy-compatible defaults).
+    # 10 FPS has a Nyquist frequency of 5 Hz; the new controlled low-band
+    # arm uses 0.1–4 Hz while the source arm retains 0.1–10 Hz.
+    action_time_min_frequency_hz: float = 0.1
+    action_time_max_frequency_hz: float = 10.0
+    action_time_gain_mode: str = "none"
 
     # Training stage. The default freezes both backbones; full expert adaptation is flow-only.
     # ``next_action`` is kept as the public name for
@@ -232,6 +238,18 @@ class PI05Config(PreTrainedConfig):
             raise ValueError("action_time_injection must be input, qk or v")
         if self.action_time_basis not in ("index", "global_dt", "physical"):
             raise ValueError("action_time_basis must be index, global_dt or physical")
+        if (
+            not math.isfinite(self.action_time_min_frequency_hz)
+            or not math.isfinite(self.action_time_max_frequency_hz)
+            or not 0 < self.action_time_min_frequency_hz < self.action_time_max_frequency_hz
+        ):
+            raise ValueError("Invalid action-time frequency band")
+        if self.action_time_gain_mode not in ("none", "relative_rms"):
+            raise ValueError("action_time_gain_mode must be none or relative_rms")
+        if self.action_time_gain_mode != "none" and (
+            not self.action_time_encoding or self.action_time_injection != "input"
+        ):
+            raise ValueError("Relative-RMS time gain requires enabled input injection")
         if self.action_time_basis != "index":
             if not self.action_time_encoding or self.action_time_injection != "input":
                 raise ValueError("Variable action_time_basis requires input temporal encoding")

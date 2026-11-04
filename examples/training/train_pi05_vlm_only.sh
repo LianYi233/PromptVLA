@@ -35,7 +35,9 @@ Extra args (use --key=value): --wandb.*, --policy.optimizer_*, --policy.schedule
 relative action-time experiment. --policy.action_time_injection=input|qk|v selects the
 action-input, first-expert-layer Q/K, or first-expert-layer V injection route.
 --policy.action_time_basis=index|global_dt|physical selects the input-relative
-time features for the task7 variable-cadence offline experiment
+time features for the task7 variable-cadence offline experiment.
+--policy.action_time_min_frequency_hz/max_frequency_hz and --policy.action_time_gain_mode
+select the opt-in bandlimited/RMS-calibrated input-time study (legacy defaults unchanged)
 (see train_pi05_task7_timepath.sh for the matched 1000-step task7 experiment).
 EOF
   exit 0
@@ -49,7 +51,9 @@ for arg in "${EXTRA_ARGS[@]}"; do
     --wandb.*=*|--policy.optimizer_*=*|--policy.scheduler_*=*|--policy.compile_model=*|\
     --policy.gradient_checkpointing=*|--policy.action_time_encoding=*|\
     --policy.action_time_encoding_dim=*|--policy.action_time_encoding_fps=*|\
-    --policy.action_time_injection=*|--policy.action_time_basis=*|--num_workers=*|--log_freq=*|--prompt_rank.*=*|--pdet.*=*|--keyframe_loss.*=*) ;;
+    --policy.action_time_injection=*|--policy.action_time_basis=*|\
+    --policy.action_time_min_frequency_hz=*|--policy.action_time_max_frequency_hz=*|\
+    --policy.action_time_gain_mode=*|--num_workers=*|--log_freq=*|--prompt_rank.*=*|--pdet.*=*|--keyframe_loss.*=*) ;;
     *) echo "Unsupported override: $arg; use --help for VLM-only controls" >&2; exit 2 ;;
   esac
 done

@@ -781,6 +781,9 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
                 action_expert_config.width,
                 config.action_time_encoding_dim,
                 config.action_time_encoding_fps,
+                min_frequency_hz=config.action_time_min_frequency_hz,
+                max_frequency_hz=config.action_time_max_frequency_hz,
+                gain_mode=config.action_time_gain_mode,
             )
             if config.action_time_encoding
             else None

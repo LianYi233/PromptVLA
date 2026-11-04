@@ -22,7 +22,11 @@ class RelativeActionTimeEncoding(nn.Module):
     is to test an additional inductive bias, not to repair reordered labels.
     """
 
-    def __init__(self, width: int, encoding_dim: int = 32, fps: float = 20.0):
+    def __init__(
+        self, width: int, encoding_dim: int = 32, fps: float = 20.0, *,
+        min_frequency_hz: float = 0.1, max_frequency_hz: float = 10.0,
+        gain_mode: str = "none",
+    ):
         super().__init__()
         if isinstance(width, bool) or not isinstance(width, int) or width < 1:
             raise ValueError("width must be a positive integer")
@@ -35,8 +39,21 @@ class RelativeActionTimeEncoding(nn.Module):
             raise ValueError("encoding_dim must be a positive even integer of at least 2")
         if isinstance(fps, bool) or not math.isfinite(fps) or fps <= 0:
             raise ValueError("fps must be finite and positive")
+        if (
+            not math.isfinite(min_frequency_hz)
+            or not math.isfinite(max_frequency_hz)
+            or min_frequency_hz <= 0
+            or max_frequency_hz <= min_frequency_hz
+        ):
+            raise ValueError("Time frequencies must satisfy 0 < min_frequency_hz < max_frequency_hz")
+        if gain_mode not in ("none", "relative_rms"):
+            raise ValueError("gain_mode must be none or relative_rms")
         self.encoding_dim = encoding_dim
         self.fps = float(fps)
+        self.min_frequency_hz = float(min_frequency_hz)
+        self.max_frequency_hz = float(max_frequency_hz)
+        self.gain_mode = gain_mode
+        # Still exactly width*encoding_dim learnable parameters, no RNG draw.
         self.weight = nn.Parameter(torch.zeros(width, encoding_dim))
 
     def features(
@@ -70,7 +87,12 @@ class RelativeActionTimeEncoding(nn.Module):
                 if basis == "global_dt"
                 else delta[:, None] * offsets[None, :]
             )
-        frequencies = torch.logspace(-1, 1, self.encoding_dim // 2, device=device)
+        frequencies = torch.logspace(
+            math.log10(self.min_frequency_hz),
+            math.log10(self.max_frequency_hz),
+            self.encoding_dim // 2,
+            device=device,
+        )
         phases = 2 * math.pi * seconds[..., None] * frequencies
         return torch.cat((phases.sin(), phases.cos()), dim=-1)
 
@@ -89,6 +111,18 @@ class RelativeActionTimeEncoding(nn.Module):
         correction = F.linear(features.to(dtype=self.weight.dtype), self.weight)
         if correction.ndim == 2:
             correction = correction.unsqueeze(0)
+        if self.gain_mode == "relative_rms":
+            # A bounded, per-token content-dependent gain. Normalization
+            # over the chunk keeps its typical amplitude near one; detach
+            # prevents the gate from becoming a second gradient path
+            # through the noisy-action input. No learnable gate parameters.
+            with torch.no_grad():
+                token_rms = action_embeddings.detach().float().square().mean(
+                    dim=-1, keepdim=True
+                ).add(1e-6).sqrt()
+                chunk_scale = token_rms.mean(dim=1, keepdim=True).clamp_min(1e-4)
+                gains = (token_rms / chunk_scale).clamp(0.5, 2.0)
+            correction = correction * gains.to(dtype=correction.dtype)
         return action_embeddings + correction.to(dtype=action_embeddings.dtype)
 
 
