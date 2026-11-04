@@ -38,6 +38,8 @@ D/E/F 新种子重复：见 [D1/E1/F1、D2/E2/F2 一次启动说明](examples/an
 
 两样本顺序对照：见 [同一对简单/困难观测，交换两个3000步阶段](examples/analysis/README_pi05_two_frame.md)。复用评分缓存，选同 task/episode 的两个完整、不重叠动作窗口；E2H/H2E 各训练6000步、曝光各半，固定帧与噪声配对，仅训练VLM2+完整action expert。四卡并行两组，记录两个训练样本各自的固定损失，只保存最终006000。
 
+LIBERO-long task7 场景/策略随机种子解耦、RoPE 40%-50%难度校准与冻结式双GPU配对评测：[Task7 Dual-Seed Difficulty Lock](examples/analysis/README_task7_dualseed_baseline_lock.md)。
+
 LIBERO-long task7 时间输入频率/RMS 优化实验（三组各1000步、复用旧对照）：[Task7 Input-Time Spectral Study](examples/analysis/README_pi05_task7_input_spectrum.md)。
 
 LIBERO-long task7 两套时间编码实验统一双卡评测（8组、终端汇总）：[Task7 Eightway Evaluation](examples/analysis/README_pi05_task7_all8_eval.md)。
