@@ -1,4 +1,4 @@
-"""Train task7 RoPE/Time-Input, immediately evaluate each, then plot time evidence.
+"""Train task7 models, evaluate each, then run paired time-alignment diagnostics.
 
 The existing two-GPU, batch32-per-GPU, 1000-update training recipe is reused
 without changing its samples, prompt, flow-noise, or flow-time streams.
@@ -42,6 +42,9 @@ DEFAULT_NOISE_SEEDS = "3000,4000,5000"
 TIMEPATH_MODULE = "lerobot.scripts.pi05_task7_timepath_experiment"
 CONSTANT_MODULE = "lerobot.scripts.pi05_task7_constant_action"
 EVIDENCE_MODULE = "lerobot.scripts.pi05_task7_time_evidence"
+FULL_SAMPLING_MODULE = "lerobot.scripts.pi05_task7_full_sampling"
+# Match the frozen closed-loop entry point in run_eval_libero-full.sh.
+EXECUTED_ACTION_STEPS = 10
 
 
 def integer_list(value: str, label: str) -> tuple[int, ...]:
@@ -254,6 +257,27 @@ def evidence_command(args, comparison: Path, checkpoints: dict[str, Path] | None
     return command
 
 
+def full_sampling_command(args, checkpoint: Path | None = None) -> list[str]:
+    """Use the native sampler and one Time-Input model for all three conditions."""
+    command = [
+        sys.executable, "-u", "-m", FULL_SAMPLING_MODULE,
+        "--directory", str(args.directory),
+        "--output-root", str(args.output_root),
+        "--repeat", str(args.repeat),
+        "--tokenizer", str(args.tokenizer),
+        "--dataset-repo-id", args.dataset_repo_id,
+        "--gpu", str(args.probe_gpu),
+        "--noise-seeds", comma(args.noise_seeds),
+        "--probe-demos", str(args.probe_demos),
+        "--windows-per-demo", str(args.windows_per_demo),
+        "--executed-steps", str(EXECUTED_ACTION_STEPS),
+        "--output", str(args.output / "full_sampling"),
+    ]
+    if checkpoint is not None:
+        command.extend(["--time-input-checkpoint", str(checkpoint)])
+    return command
+
+
 def show_plan(args) -> None:
     print("DRY RUN: no files are read or written; no GPU, model, or saved plan is required.")
     print(
@@ -284,8 +308,11 @@ def show_plan(args) -> None:
     print(f"[REPORT] Verify every cached outcome and write {comparison}")
     print("\n[CONSTANT-ACTION INPUT PROBE]")
     print(shlex.join(constant_command(args)))
-    print("\n[FULL MODEL TIME-ALIGNMENT PROBE AND FIGURES]")
+    print("\n[ONE-STEP FLOW TIME-ALIGNMENT PROBE AND FIGURES]")
     print(shlex.join(evidence_command(args, comparison)))
+    print("\n[FULL DENOISING: CORRECT / ZERO / REVERSED]")
+    print("Same Time-Input weights, observations and pure initial noise; report first 10 and all 50 steps.")
+    print(shlex.join(full_sampling_command(args)))
     print(f"\n[COMPLETE ONLY AFTER ALL STAGES SUCCEED] {args.output / 'pipeline_state.json'}")
 
 
@@ -627,19 +654,39 @@ def run_pipeline(args, *, backend=None, command_runner=run_logged) -> dict | Non
                 "fig04_time_alignment_evidence.png", "fig04_time_alignment_evidence.svg",
             ))
             journal.finish("time_evidence", outputs=evidence_files)
+            command = full_sampling_command(args, checkpoints["time_input"])
+            log = args.output / "logs" / "full-sampling.log"
+            journal.start("full_sampling", command=command, log=log)
+            command_runner(command, log, env)
+            full_sampling_files = required_outputs(args.output / "full_sampling", (
+                "full_sampling_evidence.json", "full_sampling_arrays.npz",
+                "fig05_full_sampling_time_alignment.png", "fig05_full_sampling_time_alignment.svg",
+            ))
+            journal.finish(
+                "full_sampling", outputs=full_sampling_files,
+                conditions=["correct", "zero", "reversed"],
+                checkpoint=str(checkpoints["time_input"]),
+                executed_steps=EXECUTED_ACTION_STEPS,
+                inference_steps="checkpoint_config",
+            )
             for job in jobs:
                 if backend.fingerprint(job["checkpoint"]) != fingerprints[job["case"]]:
                     raise ValueError(f"Checkpoint changed while generating evidence: {job['checkpoint']}")
             journal.complete(
                 comparison_json=str(comparison), constant_outputs=constant_files,
                 evidence_outputs=evidence_files,
+                full_sampling_outputs=full_sampling_files,
             )
         except BaseException as exc:
             journal.fail(exc)
             raise
     print(f"\nPipeline completed: {args.output / 'pipeline_state.json'}", flush=True)
     print(f"Paired task success: {comparison}", flush=True)
-    print(f"Time-alignment figure: {args.output / 'evidence' / 'fig04_time_alignment_evidence.png'}", flush=True)
+    print(f"One-step Flow figure: {args.output / 'evidence' / 'fig04_time_alignment_evidence.png'}", flush=True)
+    print(
+        f"Full-sampling alignment figure: {args.output / 'full_sampling' / 'fig05_full_sampling_time_alignment.png'}",
+        flush=True,
+    )
     print(
         "The plots report measured gains or losses; completing the pipeline does not "
         "prejudge whether correct time correspondence improves prediction.", flush=True,
