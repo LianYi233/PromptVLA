@@ -38,6 +38,10 @@ D/E/F 新种子重复：见 [D1/E1/F1、D2/E2/F2 一次启动说明](examples/an
 
 两样本顺序对照：见 [同一对简单/困难观测，交换两个3000步阶段](examples/analysis/README_pi05_two_frame.md)。复用评分缓存，选同 task/episode 的两个完整、不重叠动作窗口；E2H/H2E 各训练6000步、曝光各半，固定帧与噪声配对，仅训练VLM2+完整action expert。四卡并行两组，记录两个训练样本各自的固定损失，只保存最终006000。
 
+LIBERO-long task7 一键训练→自动测试→机制图：[训练与评测集成入口](examples/analysis/README_task7_train_eval.md)。`GPU_IDS=0,1 bash run_task7_train_eval.sh --repeat 2` 保留1000步双卡训练，每个模型训练后立即运行固定场景/策略种子评测，并生成真实动作的Correct/Zero/Reversed时间对应关系诊断图。
+
+LIBERO-long task7 双种子基线校准与锁定：[校准/独立策略种子比较](examples/analysis/README_task7_dualseed_baseline_lock.md)。新的一键入口沿用固定压力场景，不要求新checkpoint再次达到40%–50%。
+
 LIBERO-long task7 RoPE/Time-Input 时间信息机制诊断图（真实逐episode配对、Time-Input归零/反转干预与离线Flow误差）：[Task7 RoPE/Time-Input Evidence](examples/analysis/README_task7_time_rope_mechanism.md)。
 
 LIBERO-long task7 时间输入频率/RMS 优化实验（三组各1000步、复用旧对照）：[Task7 Input-Time Spectral Study](examples/analysis/README_pi05_task7_input_spectrum.md)。
@@ -205,3 +209,4 @@ The inherited implementation and notices are retained under [Apache-2.0](LICENSE
 The previous repository README is preserved as [README_LEROBOT.md](README_LEROBOT.md).
 Historical support for other models and training recipes remains in the codebase;
 the experiment entry points above define the PromptVLA VLM-only setup.
+

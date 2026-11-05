@@ -4,7 +4,9 @@ No checkpoint weights, MuJoCo simulator, online service, or GPU is used.
 """
 
 import json
+import sys
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import pytest
@@ -12,6 +14,73 @@ import torch
 
 from lerobot.policies.pi05.action_time import RelativeActionTimeEncoding
 from lerobot.scripts import pi05_task7_time_evidence as evidence
+
+
+@pytest.mark.parametrize("timed", [False, True], ids=["rope", "time_input"])
+def test_probe_loader_reads_real_serialized_pi05_config(monkeypatch, tmp_path, timed):
+    """Exercise real draccus decoding; only GPU weights and tokenization are stubbed."""
+    import lerobot.policies as policies
+    from lerobot.configs.types import FeatureType, PolicyFeature
+    from lerobot.policies.pi05.configuration_pi05 import PI05Config
+
+    saved_config = PI05Config(
+        device="cpu", train_action_expert=True, num_vlm_prompt_tokens=2,
+        num_prompt_tokens=0, cabo_enabled=False, next_action_pretrain_steps=0,
+        next_action_bridge_steps=0, action_time_encoding=timed,
+        action_time_encoding_fps=10.0, compile_model=True, gradient_checkpointing=True,
+        output_features={"action": PolicyFeature(type=FeatureType.ACTION, shape=(7,))},
+    )
+    checkpoint = tmp_path / "pretrained_model"
+    saved_config.save_pretrained(checkpoint)
+    config_path = checkpoint / "config.json"
+    original_bytes = config_path.read_bytes()
+    assert json.loads(original_bytes)["type"] == "pi05"
+    tokenizer = tmp_path / "tokenizer"
+    tokenizer.mkdir()
+    seen = {}
+
+    class WeightlessPolicy(torch.nn.Module):
+        pass
+
+    policy = WeightlessPolicy()
+    processor = object()
+
+    def load_weights(path, *, config, **kwargs):
+        seen.update(checkpoint=path, config=config, weight_options=kwargs)
+        return policy
+
+    def make_processors(**kwargs):
+        seen["processor_options"] = kwargs
+        return processor, None
+
+    modeling = ModuleType("lerobot.policies.pi05.modeling_pi05")
+    modeling.PI05Policy = SimpleNamespace(from_pretrained=load_weights)
+    monkeypatch.setitem(sys.modules, modeling.__name__, modeling)
+    monkeypatch.setattr(policies, "make_pre_post_processors", make_processors, raising=False)
+
+    loaded_policy, loaded_processor = evidence._load_policy_and_processor(
+        checkpoint, tokenizer, torch.device("cpu")
+    )
+    config = seen["config"]
+    assert isinstance(config, PI05Config)
+    assert config.action_time_encoding is timed
+    assert config.action_time_encoding_fps == 10.0
+    assert config.output_features["action"] == saved_config.output_features["action"]
+    assert config.num_vlm_prompt_tokens == 2
+    assert config.device == "cpu"
+    assert config.tokenizer_name == str(tokenizer.resolve())
+    assert not config.compile_model and not config.gradient_checkpointing
+    assert seen["checkpoint"] == checkpoint.resolve()
+    assert seen["weight_options"] == {"local_files_only": True, "strict": True}
+    assert seen["processor_options"]["policy_cfg"] is config
+    assert seen["processor_options"]["preprocessor_overrides"] == {
+        "device_processor": {"device": "cpu"},
+        "tokenizer_processor": {"tokenizer_name": str(tokenizer.resolve())},
+    }
+    assert loaded_policy is policy and not policy.training
+    assert loaded_processor is processor
+    # The checkpoint fingerprint must remain valid for existing eval caches.
+    assert config_path.read_bytes() == original_bytes
 
 
 def test_paired_outcomes_with_crossed_successes():
@@ -160,3 +229,234 @@ def test_default_data_inference_does_not_auto_retrain_or_execute_robot():
     assert '"per_step_mean_mse"' in source
     assert 'if args.mode in ("probe","all")' in source
     assert "action_time_encoder" in source
+
+
+def _metadata(episodes=9, length=200):
+    return {
+        "task_index":np.full(episodes*length,11),
+        "episode_index":np.repeat(np.arange(episodes),length),
+        "frame_index":np.tile(np.arange(length),episodes),
+    }
+
+
+def test_default_selection_covers_early_middle_late_in_each_demo():
+    meta=_metadata()
+    anchors=evidence.select_nontraining_anchors(meta,task_index=11,train_episode=0)
+    descriptions=evidence.describe_anchors(meta,anchors)
+    assert len(anchors)==24
+    assert {row["episode_index"] for row in descriptions}==set(range(1,9))
+    for episode in range(1,9):
+        rows=[row for row in descriptions if row["episode_index"]==episode]
+        assert [row["frame_index"] for row in rows]==[0,75,150]
+        assert [row["phase"] for row in rows]==["early","middle","late"]
+        assert all(row["end_frame_inclusive"]<200 for row in rows)
+    capped=evidence.select_nontraining_anchors(meta,task_index=11,train_episode=0,count=8)
+    # The legacy cap samples the complete coverage, not eight episode starts.
+    assert {row["phase"] for row in evidence.describe_anchors(meta,capped)}=={"early","middle","late"}
+
+
+def test_short_demos_report_overlap_without_crossing_boundaries():
+    meta=_metadata(episodes=3,length=75)
+    anchors=evidence.select_nontraining_anchors(meta,task_index=11,train_episode=0)
+    rows=evidence.describe_anchors(meta,anchors)
+    assert len(rows)==6
+    assert any(row["overlaps_previous_selected_window"] for row in rows)
+    assert all(row["end_frame_inclusive"]<75 for row in rows)
+    with pytest.raises(ValueError,match="crosses an episode"):
+        evidence.describe_anchors(meta,[(1,140)])
+
+
+def test_repeat_selects_both_requested_checkpoints(tmp_path):
+    args=SimpleNamespace(directory=tmp_path/"plan",output_root=tmp_path/"models",repeat=3,
+                         rope_checkpoint=None,time_input_checkpoint=None)
+    paths=evidence.resolve_probe_checkpoints(args,{"selection":{"episode_index":7}})
+    assert "r3-rope-task7-ep7" in str(paths["rope"])
+    assert "r3-time_input-task7-ep7" in str(paths["time_input"])
+
+
+def test_probe_grid_defaults_legacy_overrides_and_invalid_values():
+    assert evidence.probe_grid(SimpleNamespace())==([0.2,0.5,0.8],[3000,4000,5000])
+    assert evidence.probe_grid(SimpleNamespace(flow_time=0.5,noise_seed=42))==([0.5],[42])
+    assert evidence.probe_grid(SimpleNamespace(flow_times="0.3,0.7",noise_seeds="7,9"))==([0.3,0.7],[7,9])
+    for invalid in ("0,0.5","0.3,nan","0.5,0.5","1", ""):
+        with pytest.raises(ValueError,match="Flow times|flow times"):
+            evidence.parse_flow_times(invalid)
+    with pytest.raises(ValueError,match="either --flow"):
+        evidence.probe_grid(SimpleNamespace(flow_time=0.5,flow_times="0.2,0.8"))
+
+
+def test_episode_aggregation_does_not_count_noises_or_windows_as_demos():
+    conditions=[
+        {"episode_index":1,"global_frame_index":10},
+        {"episode_index":1,"global_frame_index":10},
+        {"episode_index":1,"global_frame_index":10},
+        {"episode_index":1,"global_frame_index":30},
+        {"episode_index":2,"global_frame_index":60},
+    ]
+    episodes,means=evidence.episode_means(np.array([1.,1.,1.,3.,20.]),conditions)
+    assert episodes==[1,2]
+    np.testing.assert_allclose(means,[2.,20.])
+    assert means.mean()==11.0
+    with pytest.raises(ValueError,match="nonfinite"):
+        evidence.episode_means(np.array([1.,1.,1.,3.,np.nan]),conditions)
+
+
+def test_alignment_summary_keeps_adverse_results():
+    baseline=np.repeat(np.array([[1.],[3.]]),50,axis=1)
+    data={"episode_ids":[10,20],"rope":{"mse":{"correct":baseline+.1}},
+          "time_input":{"mse":{"correct":baseline+.4,"zero":baseline,"reversed":baseline-.2}}}
+    report=evidence.alignment_summary(data)
+    assert report["observed_direction"]=="mixed_or_adverse_alignment_evidence"
+    assert report["mean_paired_deltas"]["zero_minus_correct"]==pytest.approx(-.4)
+    assert report["mean_paired_deltas"]["reversed_minus_correct"]==pytest.approx(-.6)
+    assert report["mean_paired_deltas"]["correct_minus_rope"]==pytest.approx(.3)
+    assert report["delta_direction_counts"]["zero_minus_correct"]["negative"]==2
+
+
+def test_comparison_and_checkpoint_training_plan_must_match(tmp_path):
+    record={"selection":{"episode_index":7},"dataset_root":"/example/data"}
+    plan=tmp_path/"plan"
+    plan.mkdir()
+    (plan/"manifest.json").write_text(json.dumps(record))
+    digest=evidence.previous.file_hash(plan/"manifest.json")
+    evidence.validate_comparison_plan({"settings":{"preparation_sha256":digest}},plan)
+    evidence.validate_comparison_plan({"lock":{"settings":{"preparation_sha256":digest}}},plan)
+    with pytest.raises(ValueError,match="training plan differs"):
+        evidence.validate_comparison_plan({"settings":{"preparation_sha256":"different"}},plan)
+    checkpoint=tmp_path/"run"/"checkpoints"/"001000"/"pretrained_model"
+    checkpoint.mkdir(parents=True)
+    with pytest.raises(ValueError,match="missing training provenance"):
+        evidence.validate_training_provenance({"rope":checkpoint},record)
+    descriptor=checkpoint.parents[2]/"gripper_event_experiment.json"
+    descriptor.write_text(json.dumps({"preparation":record}))
+    assert evidence.validate_training_provenance({"rope":checkpoint},record)["rope"]["sha256"]
+    descriptor.write_text(json.dumps({"preparation":{"selection":{"episode_index":8}}}))
+    with pytest.raises(ValueError,match="training plan differs"):
+        evidence.validate_training_provenance({"rope":checkpoint},record)
+
+
+class _TinyPolicy:
+    """A real Torch toy used to check the harness, not a PI0.5/GPU test."""
+
+    def __init__(self, timed=True):
+        self.config=SimpleNamespace(action_time_basis="index",output_features={"action":SimpleNamespace(shape=(7,))})
+        self.model=SimpleNamespace()
+        generator=torch.Generator().manual_seed(99)
+        self.model.action_in_proj=torch.nn.Linear(32,16)
+        with torch.no_grad():
+            self.model.action_in_proj.weight.copy_(torch.randn(16,32,generator=generator)*.03)
+            self.model.action_in_proj.bias.zero_()
+        encoder=RelativeActionTimeEncoding(16,32,10.0) if timed else None
+        if encoder is not None:
+            with torch.no_grad():
+                encoder.weight.copy_(torch.randn(16,32,generator=generator)*.01)
+        self.model.action_time_encoder=encoder
+        self.calls=[]
+
+        def predict(images,masks,tokens,token_masks,x_t,t):
+            self.calls.append((x_t.detach().clone(),t.detach().clone()))
+            projected=self.model.action_in_proj(x_t)
+            residual=(encoder(projected)-projected) if encoder is not None else torch.zeros_like(projected)
+            return .1*x_t + residual.mean(dim=-1,keepdim=True)
+
+        self.model.predict_velocity=predict
+
+    def prepare_action(self,batch):
+        return batch["action"]
+
+    def _preprocess_images(self,batch):
+        return [],[]
+
+
+def _tiny_batch(frame_index=0):
+    from lerobot.utils.constants import OBS_LANGUAGE_TOKENS, OBS_LANGUAGE_ATTENTION_MASK
+
+    return {
+        "action":torch.linspace(-.4,.6,50*32).reshape(1,50,32)+frame_index/10000,
+        OBS_LANGUAGE_TOKENS:torch.zeros(1,3,dtype=torch.long),
+        OBS_LANGUAGE_ATTENTION_MASK:torch.ones(1,3,dtype=torch.bool),
+    }
+
+
+def test_one_step_action_estimate_uses_correct_flow_identity():
+    policy=_TinyPolicy(timed=False)
+    batch=_tiny_batch()
+    noise=torch.randn(1,50,32,generator=torch.Generator().manual_seed(6))
+    expected_velocity=noise-batch["action"]
+    policy.model.predict_velocity=lambda *args:expected_velocity
+    result=evidence._probe_predict(policy,batch,noise,.3)
+    np.testing.assert_allclose(result["clean_estimate"],batch["action"][0,:,:7].numpy(),atol=1e-7)
+    np.testing.assert_allclose(result["per_step_mse"],0,atol=0)
+    policy.config.action_time_basis="physical"
+    with pytest.raises(ValueError,match="basis=index"):
+        evidence._probe_predict(policy,batch,noise,.3)
+
+
+def test_multigrid_forward_pairs_inputs_across_all_interventions(monkeypatch,tmp_path):
+    policy=_TinyPolicy()
+    before=policy.model.action_time_encoder.weight.detach().clone()
+    monkeypatch.setattr(evidence,"_load_policy_and_processor",lambda *args:(policy,None))
+    monkeypatch.setattr(evidence,"_batch_for_index",lambda dataset,actions,idx,processor:_tiny_batch(idx))
+    args=SimpleNamespace(tokenizer=tmp_path,flow_times="0.2,0.8",noise_seeds="11,12")
+    result=evidence._compute_probe_for_model(
+        "time_input",tmp_path,None,None,[(1,100),(2,200)],args,torch.device("cpu"),
+        interventions=("correct","zero","reversed"),
+    )
+    assert len(result["conditions"])==8
+    assert result["mse"]["correct"].shape==(8,50)
+    assert result["clean_estimate"]["reversed"].shape==(8,50,7)
+    assert len(policy.calls)==24
+    for start in range(0,len(policy.calls),3):
+        for later in (1,2):
+            torch.testing.assert_close(policy.calls[start][0],policy.calls[start+later][0],atol=0,rtol=0)
+            torch.testing.assert_close(policy.calls[start][1],policy.calls[start+later][1],atol=0,rtol=0)
+    torch.testing.assert_close(policy.model.action_time_encoder.weight,before,atol=0,rtol=0)
+    assert not np.array_equal(result["pred"]["correct"],result["pred"]["zero"])
+
+
+def test_complete_cpu_probe_exports_episode_summary_and_honest_figure(monkeypatch,tmp_path):
+    pytest.importorskip("matplotlib")
+    record={"dataset_root":str(tmp_path/"dataset"),"fps":10.,"selection":{"episode_index":0,"task_index":11}}
+    checkpoints={}
+    for case in ("rope","time_input"):
+        path=tmp_path/case/"checkpoints"/"001000"/"pretrained_model"
+        path.mkdir(parents=True)
+        (path/"model.safetensors").write_bytes(b"test fixture: tiny in-memory model")
+        config={"train_action_expert":True,"num_vlm_prompt_tokens":2,"num_prompt_tokens":0,
+                "chunk_size":50,"action_time_encoding":case=="time_input","action_time_injection":"input",
+                "action_time_basis":"index","normalization_mapping":{},"input_features":{},"output_features":{}}
+        (path/"config.json").write_text(json.dumps(config))
+        (path.parents[2]/"gripper_event_experiment.json").write_text(json.dumps({"preparation":record}))
+        checkpoints[case]=path
+    args=SimpleNamespace(
+        flow_times="0.2,0.5",noise_seeds="11,12",allow_cpu=True,gpu=0,repeat=2,
+        directory=tmp_path/"plan",output_root=tmp_path,output=tmp_path/"analysis",tokenizer=tmp_path,
+        rope_checkpoint=checkpoints["rope"],time_input_checkpoint=checkpoints["time_input"],
+        samples=None,probe_demos=2,windows_per_demo=3,
+    )
+    meta=_metadata(episodes=3)
+    anchors=evidence.select_nontraining_anchors(meta,task_index=11,train_episode=0,demos=2)
+    monkeypatch.setattr(torch.cuda,"is_available",lambda:False)
+    monkeypatch.setattr(evidence,"_probe_data",lambda args,record:(anchors,None,None,meta))
+    monkeypatch.setattr(evidence,"_batch_for_index",lambda dataset,actions,idx,processor:_tiny_batch(idx))
+    monkeypatch.setattr(evidence,"_load_policy_and_processor",
+                        lambda path,*args:(_TinyPolicy(timed="time_input" in Path(path).parts),None))
+    result=evidence.probe(args,record)
+    summary=result["time_alignment_summary"]
+    assert (summary["n_episodes"],summary["n_anchors"],summary["n_noise"],summary["n_flow"],summary["n_conditions"])==(2,6,2,2,24)
+    assert summary["aggregation_unit"]=="demonstration"
+    assert len(summary["paired_episode_deltas"]["zero_minus_correct"])==2
+    assert len(result["paired_condition_mse"]["correct"])==24
+    assert len(result["paired_anchor_mse"]["correct"])==6
+    assert summary["representative_condition"]["episode_index"]==1
+    assert summary["representative_condition"]["frame_index"]==75
+    assert summary["representative_condition"]["flow_time"]==.5
+    assert summary["representative_condition"]["noise_seed"]==11
+    assert len(result["figure_paths"])==6
+    assert all(Path(path).stat().st_size>500 for path in result["figure_paths"])
+    saved=json.loads((args.output/"time_alignment_evidence.json").read_text())
+    assert saved["mean_paired_deltas"]==summary["mean_paired_deltas"]
+    arrays=np.load(args.output/"offline_probe_arrays.npz")
+    assert arrays["correct_velocity"].shape==(24,50,7)
+    assert arrays["episode_mean_time_residual"].shape==(2,50,16)
+
