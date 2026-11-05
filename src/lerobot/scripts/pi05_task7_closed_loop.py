@@ -106,6 +106,155 @@ def freeze_json(path, value):
         atomic_json(path, value)
 
 
+def recover_empty_failed_attempt(output, settings, specs):
+    """Archive a failed, evidence-free attempt after a source-only fix.
+
+    Must run under the existing output lock. Completed or partially recorded
+    experiments never cross implementation fingerprints, even if the enclosing
+    state did not yet register a completed cell. Unknown evaluation files also
+    prevent recovery because their lack of episode evidence cannot be established.
+    """
+    import fcntl
+    import tempfile
+    from contextlib import ExitStack
+
+    from lerobot.scripts.pi05_task7_train_eval import atomic_json, utc_now
+
+    protocol_path = output / "closed_loop_protocol.json"
+    if not protocol_path.exists():
+        return None
+
+    def reject(reason):
+        raise ValueError(
+            f"Frozen closed-loop settings changed: {protocol_path}; {reason}; use a separate --output"
+        )
+
+    try:
+        previous = json.loads(protocol_path.read_text())
+    except (OSError, ValueError) as exc:
+        reject(f"cannot verify the prior frozen protocol ({exc})")
+    if previous == settings:
+        return None
+    if (not isinstance(previous, dict)
+            or {key: value for key, value in previous.items() if key != "source_sha256"}
+            != {key: value for key, value in settings.items() if key != "source_sha256"}
+            or not isinstance(previous.get("source_sha256"), dict)
+            or not previous["source_sha256"]):
+        reject("automatic recovery requires identical non-code settings")
+    state_path = output / "closed_loop_state.json"
+    try:
+        previous_state = json.loads(state_path.read_text())
+    except (OSError, ValueError) as exc:
+        reject(f"cannot verify the prior failed state ({exc})")
+    if (not isinstance(previous_state, dict)
+            or previous_state.get("status") != "failed"
+            or previous_state.get("protocol") != PROTOCOL
+            or previous_state.get("completed_cells") != []
+            or previous_state.get("settings") != previous):
+        reject("automatic recovery requires a matching failed state with zero completed cells")
+    comparison_path = output / "comparison-time-interventions.json"
+    if comparison_path.exists() or comparison_path.is_symlink():
+        reject("an existing comparison contains evaluation outcomes")
+
+    configs = {spec[key]: spec[value] for spec in specs
+               for key, value in (("shift_path", "shift_config"), ("config_path", "config"))}
+    cell_directories = {spec["result"].parent for spec in specs}
+    metadata = set(configs) | {directory / name for directory in cell_directories
+                              for name in ("resume_manifest.json", "resume_summary.json")}
+    locks = {directory / ".resume.lock" for directory in cell_directories}
+    artifacts = {protocol_path, state_path}
+
+    def check_empty_summary(path):
+        try:
+            value = json.loads(path.read_text())
+            suites = value["per_suite"]
+            rows = [value, *suites.values()]
+            empty = isinstance(suites, dict) and all(
+                type(row.get("saved_episodes")) is int and row["saved_episodes"] == 0
+                and type(row.get("successes")) is int and row["successes"] == 0
+                and row.get("pc_success_saved") is None for row in rows
+            )
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            empty = False
+        if not empty:
+            reject(f"saved episodes or unverifiable progress exist in {path}")
+
+    with ExitStack() as held_locks:
+        # Do not move or replace lock files: another process may still have the
+        # original inode open. A previous orphaned native worker must finish first.
+        for path in sorted(locks):
+            if path.exists():
+                if path.is_symlink() or not path.is_file() or path.resolve() != path:
+                    reject(f"cannot verify native lock {path}")
+                stream = held_locks.enter_context(path.open("a"))
+                try:
+                    fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    reject(f"a native evaluator is still using {path.parent}")
+
+        evaluations = output / "evaluations"
+        if evaluations.is_symlink() or (evaluations.exists() and not evaluations.is_dir()):
+            reject(f"cannot inspect the evaluation directory: {evaluations}")
+        for path in sorted(evaluations.rglob("*")):
+            if path.is_symlink():
+                reject(f"cannot establish absence of episode evidence through {path}")
+            if path.is_dir():
+                continue
+            if not path.is_file() or path not in metadata | locks:
+                reject(f"episode/task outputs, traces, or unknown evaluation artifacts exist: {path}")
+            if path in configs:
+                try:
+                    matches = json.loads(path.read_text()) == configs[path]
+                except (OSError, ValueError):
+                    matches = False
+                if not matches:
+                    reject(f"a per-cell configuration changed: {path}")
+            elif path.name == "resume_summary.json":
+                check_empty_summary(path)
+            if path not in locks:
+                artifacts.add(path)
+
+        # Only the named cells' generated logs belong to this attempt. Personal
+        # notes or other files in the output directory stay exactly where they are.
+        for spec in specs:
+            identity = f"scene{spec['scene_seed']}-policy{spec['policy_seed']}"
+            outer_log = output / "logs" / f"{spec['mode']}-{identity}.log"
+            if outer_log.exists():
+                artifacts.add(outer_log)
+            native_logs = output / "logs" / spec["mode"] / identity / "eval" / "task7-timepath-qkv"
+            artifacts.update(native_logs.glob("eval_*.log"))
+        if any(path.is_symlink() or not path.is_file() or path.resolve() != path for path in artifacts):
+            reject("a failed-attempt artifact is not a regular file inside the output directory")
+
+        archive_root = output / "empty_failed_attempts"
+        if archive_root.is_symlink():
+            reject("the failed-attempt archive directory is a symlink")
+        archive_root.mkdir(exist_ok=True)
+        archive = Path(tempfile.mkdtemp(prefix="attempt-", dir=archive_root))
+        # Move protocol/state last. If archival fails, roll back every move so
+        # frozen settings cannot disappear while their old native caches remain.
+        ordered = sorted(artifacts - {protocol_path, state_path}) + [protocol_path, state_path]
+        moved = []
+        try:
+            for source in ordered:
+                target = archive / source.relative_to(output)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                source.rename(target)
+                moved.append((source, target))
+            atomic_json(archive / "recovery.json", {
+                "archived_at": utc_now(),
+                "reason": "Source-only change after a failed attempt with no saved episode/task/trace evidence.",
+                "files": [str(path.relative_to(output)) for path in ordered],
+                "next_source_sha256": settings["source_sha256"],
+            })
+        except BaseException:
+            for source, target in reversed(moved):
+                target.rename(source)
+            raise
+    print(f"Archived empty failed attempt: {archive}; restarting with the updated execution source.", flush=True)
+    return archive
+
+
 def tokenizer_fingerprint(directory):
     """Match the native launcher's processor provenance, including in-place changes."""
     directory = Path(directory)
@@ -264,14 +413,17 @@ def run(args, *, backend=None, command_runner=None, reporter=None):
     fingerprint = backend.fingerprint(job["checkpoint"])
     settings = settings_for(args, job, config, fingerprint)
     with output_lock(args.output):
+        specs = [backend.spec(args, record, job, mode, scene, policy)
+                 for mode in MODES for scene in args.scene_seeds for policy in args.test_policy_seeds]
+        archive = recover_empty_failed_attempt(args.output, settings, specs)
         freeze_json(args.output / "closed_loop_protocol.json", settings)
         state_path = args.output / "closed_loop_state.json"
         state = {"protocol": PROTOCOL, "status": "running", "settings": settings,
                  "started_at": utc_now(), "completed_cells": []}
+        if archive is not None:
+            state["recovered_empty_attempt"] = str(archive)
         atomic_json(state_path, state)
         try:
-            specs = [backend.spec(args, record, job, mode, scene, policy)
-                     for mode in MODES for scene in args.scene_seeds for policy in args.test_policy_seeds]
             # Validate/freeze all configs before starting workers. Each intervention has its own cache.
             for spec in specs:
                 freeze_json(spec["shift_path"], spec["shift_config"])

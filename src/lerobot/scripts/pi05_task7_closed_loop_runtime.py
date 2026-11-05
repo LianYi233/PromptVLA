@@ -277,6 +277,53 @@ def _replace_method(instance, name, replacement):
             delattr(instance, name)
 
 
+def _deployment_observation_batch(batch):
+    """Validate the native processor envelope and return only causal inputs.
+
+    PolicyProcessorPipeline's default transition_to_batch converter always adds
+    action=None, a zero reward, false terminal flags and an empty info mapping.
+    These are framework placeholders, not future-action supervision. Keep the
+    original batch intact for the native policy; only the observation/task
+    projection is used for the paired observation fingerprint.
+    """
+    from numbers import Real
+
+    import torch
+
+    if not isinstance(batch, dict):
+        raise ValueError("Deployment policy batch must be a dictionary")
+
+    def default_scalar(value):
+        # Batch/device processors may represent a default as a scalar tensor
+        # or a one-element tensor for this single-environment evaluator.
+        if torch.is_tensor(value):
+            return value.numel() == 1 and not value.is_complex() and value.detach().item() == 0
+        return isinstance(value, Real) and value == 0
+
+    observations, invalid = {}, []
+    for key, value in batch.items():
+        if isinstance(key, str) and (key.startswith("observation.") or key == "task"):
+            observations[key] = value
+        elif key == "action" and value is None:
+            continue
+        elif key in ("next.reward", "next.done", "next.truncated") and default_scalar(value):
+            continue
+        elif key == "info" and isinstance(value, dict) and not value:
+            continue
+        else:
+            invalid.append(repr(key))
+    if invalid:
+        raise ValueError(
+            "Deployment policy batch contains non-observation data in fields: "
+            + ", ".join(invalid)
+            + ". Only observations/task and empty native processor metadata are allowed "
+            "(action=None, zero reward, false terminal flags, empty info)."
+        )
+    if not any(key.startswith("observation.") for key in observations):
+        raise ValueError("Deployment policy batch contains no observations")
+    return observations
+
+
 @contextmanager
 def audit_policy(policy, intervention):
     """Retain native randomness and queueing while recording each actual chunk."""
@@ -331,10 +378,8 @@ def audit_policy(policy, intervention):
         start_step = len(recorded["normalized_actions"])
         if start_step != len(recorded["chunks"]) * EXECUTED_STEPS:
             raise RuntimeError("Policy replanning cadence is no longer ten executed actions")
-        if any(not (key.startswith("observation.") or key == "task") for key in batch):
-            raise ValueError("Deployment policy inputs may contain observations and task only")
+        observation_hash = observation_sha256(_deployment_observation_batch(batch))
         active = {"flow_times": []}
-        observation_hash = observation_sha256(batch)
         try:
             result = original_predict(batch)
             steps = policy.config.num_inference_steps
@@ -345,7 +390,7 @@ def audit_policy(policy, intervention):
                 raise RuntimeError("Native denoising count or schedule changed")
             if tuple(result.shape) != (1, HORIZON, ACTION_DIM) or not torch.isfinite(result).all():
                 raise ValueError("Expected a finite native [1,50,7] action chunk")
-            if observation_sha256(batch) != observation_hash:
+            if observation_sha256(_deployment_observation_batch(batch)) != observation_hash:
                 raise RuntimeError("Policy sampling modified its observation inputs")
             recorded["chunks"].append({
                 "chunk_index": len(recorded["chunks"]), "start_step": start_step,

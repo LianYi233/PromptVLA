@@ -160,6 +160,219 @@ def test_failed_child_is_not_scored_as_failure_episode(tmp_path, isolated_hashes
     assert state["completed_cells"] == []
 
 
+@pytest.fixture
+def empty_failed_attempt(tmp_path, isolated_hashes):
+    args = arguments(tmp_path)
+    backend = FakeBackend(args)
+
+    def fail(command, log, env):
+        directory = Path(env["LIBERO_TASK7_TIME_INTERVENTION_CONFIG"]).parent
+        (directory / "resume_manifest.json").write_text(json.dumps({"source": "before-fix"}))
+        (directory / "resume_summary.json").write_text(json.dumps({
+            "per_suite": {"libero_10": {"saved_episodes": 0, "successes": 0, "pc_success_saved": None}},
+            "saved_episodes": 0, "successes": 0, "pc_success_saved": None,
+        }))
+        (directory / ".resume.lock").touch()
+        (directory / "task_results").mkdir()
+        (directory / "trajectories").mkdir()
+        (directory / "videos" / "libero_10_7").mkdir(parents=True)
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text("Original first-action exception\n")
+        native_log_root = Path(command[command.index("--log-root") + 1]) / "eval" / "task7-timepath-qkv"
+        native_log_root.mkdir(parents=True)
+        (native_log_root / "eval_time-input-001000-libero_10-task7.log").write_text("Native exception\n")
+        raise subprocess.CalledProcessError(1, command)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        closed.run(args, backend=backend, command_runner=fail, reporter=report_fixture)
+    return args, backend
+
+
+def changed_sources(monkeypatch):
+    monkeypatch.setattr(closed, "source_hashes", lambda: {"synthetic-source": "after-fix"})
+
+
+def test_source_fix_archives_empty_failed_attempt_and_preserves_unrelated_files(empty_failed_attempt, monkeypatch):
+    import fcntl
+
+    args, backend = empty_failed_attempt
+    artifacts = {path.relative_to(args.output): path.read_bytes() for path in args.output.rglob("*")
+                 if path.is_file() and path.name not in (".pipeline.lock", ".resume.lock")}
+    locks = {path: path.stat().st_ino for path in args.output.rglob("*.lock")}
+    unrelated = [args.output / "notes.txt", args.output / "logs" / "other-experiment.log"]
+    for path in unrelated:
+        path.write_text("Keep unrelated user work\n")
+    changed_sources(monkeypatch)
+
+    def evaluate_with_lock_check(command, log, env):
+        with (args.output / ".pipeline.lock").open("a") as stream:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        backend.command_runner(command, log, env)
+
+    state = closed.run(args, backend=backend, command_runner=evaluate_with_lock_check, reporter=report_fixture)
+    archive = Path(state["recovered_empty_attempt"])
+    assert archive.parent == args.output / "empty_failed_attempts"
+    assert state["status"] == "completed"
+    assert len(backend.commands) == 12
+    for relative, content in artifacts.items():
+        assert (archive / relative).read_bytes() == content
+    assert all(path.read_text() == "Keep unrelated user work\n" for path in unrelated)
+    assert all(path.stat().st_ino == inode for path, inode in locks.items())
+    assert not list(archive.rglob("*.lock"))
+    assert not list((args.output / "evaluations").rglob("resume_manifest.json"))
+    assert state["settings"]["source_sha256"] == {"synthetic-source": "after-fix"}
+    assert json.loads((archive / "closed_loop_state.json").read_text())["status"] == "failed"
+    assert set(json.loads((archive / "recovery.json").read_text())["files"]) == {str(path) for path in artifacts}
+    # Recovery does not weaken the usual verified-cache reuse on a subsequent run.
+    closed.run(args, backend=backend, command_runner=backend.command_runner, reporter=report_fixture)
+    assert len(backend.commands) == 12
+    assert len(list((args.output / "empty_failed_attempts").iterdir())) == 1
+
+
+@pytest.mark.parametrize("evidence", [
+    "eval_info.json",
+    "task_results/libero_10_7.json",
+    "trajectories/episode-000.json",
+    "trajectories/.episode-000.json.partial",
+    "trajectories/interrupted-write.bin",
+    "videos/libero_10_7/eval_episode_0.mp4",
+    "recordings/episode_000000.parquet",
+    "unknown_partial_result.tmp",
+])
+def test_source_fix_cannot_archive_any_complete_or_partial_episode_evidence(empty_failed_attempt, monkeypatch, evidence):
+    args, backend = empty_failed_attempt
+    cell = next((args.output / "evaluations").rglob("resume_manifest.json")).parent
+    path = cell / evidence
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"successes": [False], "partial": True}))
+    before = {path: path.read_bytes() for path in args.output.rglob("*") if path.is_file()}
+    changed_sources(monkeypatch)
+    with pytest.raises(ValueError, match="episode/task outputs, traces.*separate --output"):
+        closed.run(args, backend=backend, command_runner=backend.command_runner, reporter=report_fixture)
+    assert all(path.read_bytes() == content for path, content in before.items())
+    assert not (args.output / "empty_failed_attempts").exists()
+    assert backend.commands == []
+
+
+@pytest.mark.parametrize("scope", ["overall", "suite", "invalid"])
+def test_source_fix_rejects_nonempty_or_unverifiable_native_progress(empty_failed_attempt, monkeypatch, scope):
+    args, backend = empty_failed_attempt
+    path = next((args.output / "evaluations").rglob("resume_summary.json"))
+    summary = json.loads(path.read_text())
+    if scope == "invalid":
+        path.write_text("incomplete JSON")
+    else:
+        row = summary if scope == "overall" else summary["per_suite"]["libero_10"]
+        row["saved_episodes"] = 1  # A completed failure still rules out an empty attempt.
+        path.write_text(json.dumps(summary))
+    changed_sources(monkeypatch)
+    with pytest.raises(ValueError, match="saved episodes or unverifiable progress.*separate --output"):
+        closed.run(args, backend=backend, command_runner=backend.command_runner, reporter=report_fixture)
+    assert not (args.output / "empty_failed_attempts").exists()
+    assert backend.commands == []
+
+
+@pytest.mark.parametrize("change", ["completed_cell", "running", "completed", "mismatched_settings"])
+def test_source_fix_requires_matching_failed_state_without_completed_cells(empty_failed_attempt, monkeypatch, change):
+    args, backend = empty_failed_attempt
+    path = args.output / "closed_loop_state.json"
+    state = json.loads(path.read_text())
+    if change == "completed_cell":
+        state["completed_cells"] = [{"mode": "correct", "scene_seed": 13, "policy_seed": 101}]
+    elif change == "mismatched_settings":
+        state["settings"]["shift_m"] = 0.1
+    else:
+        state["status"] = change
+    path.write_text(json.dumps(state))
+    changed_sources(monkeypatch)
+    with pytest.raises(ValueError, match="matching failed state with zero completed cells.*separate --output"):
+        closed.run(args, backend=backend, command_runner=backend.command_runner, reporter=report_fixture)
+    assert json.loads(path.read_text()) == state
+    assert not (args.output / "empty_failed_attempts").exists()
+
+
+@pytest.mark.parametrize("change", ["scene", "policy", "init", "shift", "checkpoint", "tokenizer"])
+def test_empty_failure_cannot_reset_changed_noncode_protocol(empty_failed_attempt, monkeypatch, change):
+    args, backend = empty_failed_attempt
+    frozen = (args.output / "closed_loop_protocol.json").read_bytes()
+    if change == "scene":
+        args.scene_seeds = (999,)
+    elif change == "policy":
+        args.test_policy_seeds = (999,)
+    elif change == "init":
+        args.init_seed = 123
+    elif change == "shift":
+        args.shift_m = 0.1
+    elif change == "checkpoint":
+        backend.job["checkpoint"] = args.output_root / "different-checkpoint"
+    else:
+        (args.tokenizer / "tokenizer.json").write_text("Changed tokenizer content")
+    changed_sources(monkeypatch)
+    with pytest.raises(ValueError, match="identical non-code settings.*separate --output"):
+        closed.run(args, backend=backend, command_runner=backend.command_runner, reporter=report_fixture)
+    assert (args.output / "closed_loop_protocol.json").read_bytes() == frozen
+    assert not (args.output / "empty_failed_attempts").exists()
+    assert backend.commands == []
+
+
+def test_empty_failure_recovery_keeps_existing_comparison(empty_failed_attempt, monkeypatch):
+    args, backend = empty_failed_attempt
+    path = args.output / "comparison-time-interventions.json"
+    path.write_text(json.dumps({"cells": [{"successes": [False]}]}))
+    changed_sources(monkeypatch)
+    with pytest.raises(ValueError, match="existing comparison.*separate --output"):
+        closed.run(args, backend=backend, command_runner=backend.command_runner, reporter=report_fixture)
+    assert path.exists()
+    assert not (args.output / "empty_failed_attempts").exists()
+
+
+@pytest.mark.parametrize("name", ["shift.json", "time_intervention_config.json"])
+def test_empty_failure_recovery_rejects_changed_cell_configuration(empty_failed_attempt, monkeypatch, name):
+    args, backend = empty_failed_attempt
+    path = next((args.output / "evaluations").rglob(name))
+    path.write_text(json.dumps({"scene_seed": 999}))
+    changed_sources(monkeypatch)
+    with pytest.raises(ValueError, match="per-cell configuration changed.*separate --output"):
+        closed.run(args, backend=backend, command_runner=backend.command_runner, reporter=report_fixture)
+    assert json.loads(path.read_text()) == {"scene_seed": 999}
+    assert not (args.output / "empty_failed_attempts").exists()
+
+
+def test_empty_failure_archive_error_restores_every_original_file(empty_failed_attempt, monkeypatch):
+    args, backend = empty_failed_attempt
+    before = {path: path.read_bytes() for path in args.output.rglob("*") if path.is_file()}
+    original_rename = Path.rename
+
+    def fail_on_protocol_move(path, target):
+        if path == args.output / "closed_loop_protocol.json":
+            raise OSError("synthetic archive I/O failure")
+        return original_rename(path, target)
+
+    monkeypatch.setattr(Path, "rename", fail_on_protocol_move)
+    changed_sources(monkeypatch)
+    with pytest.raises(OSError, match="synthetic archive I/O failure"):
+        closed.run(args, backend=backend, command_runner=backend.command_runner, reporter=report_fixture)
+    assert all(path.read_bytes() == content for path, content in before.items())
+    assert not [path for path in (args.output / "empty_failed_attempts").rglob("*") if path.is_file()]
+    assert backend.commands == []
+
+
+def test_empty_failure_recovery_cannot_replace_a_live_native_lock(empty_failed_attempt, monkeypatch):
+    import fcntl
+
+    args, backend = empty_failed_attempt
+    path = next((args.output / "evaluations").rglob(".resume.lock"))
+    inode = path.stat().st_ino
+    changed_sources(monkeypatch)
+    with path.open("a") as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(ValueError, match="native evaluator is still using.*separate --output"):
+            closed.run(args, backend=backend, command_runner=backend.command_runner, reporter=report_fixture)
+    assert path.stat().st_ino == inode
+    assert not (args.output / "empty_failed_attempts").exists()
+
+
 def test_tokenizer_changed_in_place_invalidates_cached_evaluation(tmp_path, isolated_hashes):
     args = arguments(tmp_path)
     backend = FakeBackend(args)

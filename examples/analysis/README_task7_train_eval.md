@@ -156,6 +156,14 @@ GPU_IDS=0,1 bash run_eval_task7_time_interventions.sh \
 
 默认共 **180 个完整 episode**，每条件 60。首次执行会重新跑 Correct，因为旧成功率缓存没有所需轨迹。每个条件、场景种子和策略种子的目录独立；成功率、模型文件、扰动设置、干预配置、实现指纹和十条轨迹全部核验后才复用。中途失败会记录在 `closed_loop_state.json`；用相同命令重跑，已完整完成且核验通过的 cell 可复用，不完整 cell 按原生评估粒度重跑。
 
+#### 从首个 episode 前的输入审计报错恢复
+
+旧版本可能在进度 `0/10` 时报告 `Deployment policy inputs may contain observations and task only`。原生 `PolicyProcessorPipeline` 的转换器会给观测 batch 自动补上 `action=None`、`next.reward=0.0`、`next.done=False`、`next.truncated=False` 和 `info={}`；这些是空占位字段。闭环审计现在接受这些默认值，仍拒绝非空动作标签、非默认结果字段和未知字段，并把原始 batch 原样交给原生 PI05。配对观测指纹仅包含观测和任务。
+
+更新代码后可以直接重跑上面的同一条命令。为避免旧失败尝试的实现指纹再次阻塞，入口仅在**上次状态为 failed、没有完成的 cell、没有任何 episode/task 结果或轨迹证据、其他冻结设置完全相同，且只有源码指纹发生变化**时，自动归档该次失败的配置、原生恢复清单、空进度文件和日志。归档保留在 `empty_failed_attempts/attempt-<unique>/`，包含原相对路径和 `recovery.json`；新 `closed_loop_state.json` 的 `recovered_empty_attempt` 字段记录归档位置。原有锁和无关文件保留。
+
+如果已有完整或部分轨迹、已有评测结果、上次进程仍持锁，或修改了 checkpoint/tokenizer/种子/位移等设置，入口不会自动归档继续。源码或实验设置变更且已有结果时，应使用新的 `--output`，保留旧结果供核对；同一实现、同一设置下的正常断点续跑仍遵循原有核验规则。此次修复无需重新训练或修改 checkpoint。
+
 每个 episode 的三种条件使用同一官方初始状态与场景位移，保留原有 `SHA256(policy_seed, init_slot)` 推理随机流。采样仍调用原生 `select_action` / `predict_action_chunk`：每次生成 50 步，执行前 10 步后再次观测，Flow 步数来自 checkpoint。记录器核对对应 chunk 的噪声哈希、去噪起点、完整去噪步骤和实际动作队列。**三种条件动作不同时，后续观测自然会不同；不能继续强行提供同一份观测并称为闭环。**
 
 每条 `episode-000.json` 到 `episode-009.json` 记录：
@@ -310,4 +318,4 @@ python -m pytest -q \
   tests/scripts/test_pi05_task7_dualseed.py
 ```
 
-这些 CPU 测试验证真实 PI05 配置的保存/解析、调度顺序、失败停止、checkpoint 选择、原生采样/动作队列、时间干预、终止状态保留、配对初始状态与噪声审计、逐维误差/示教聚合及数据驱动绘图。配置回归测试使用真实 draccus 解析器，重量级模型、tokenizer 和仿真器在相关测试中替换为小型测试对象。完整 3B 模型、数据视频读取、DDP 训练和 MuJoCo 闭环评测仍需要服务器环境。
+这些 CPU 测试验证真实 PI05 配置的保存/解析、调度顺序、失败停止、checkpoint 选择、原生采样/动作队列、时间干预、终止状态保留、配对初始状态与噪声审计、逐维误差/示教聚合及数据驱动绘图。输入审计回归实际调用仓库的 `batch_to_transition` / `transition_to_batch`，覆盖原生预处理产生的空元数据，并核对动作和 RNG 与未加审计的原生路径逐位一致；恢复测试同时覆盖空失败归档和存在部分/完整结果时拒绝混用。配置回归测试使用真实 draccus 解析器，重量级模型、tokenizer 和仿真器在相关测试中替换为小型测试对象。完整 3B 模型、数据视频读取、DDP 训练和 MuJoCo 闭环评测仍需要服务器环境。

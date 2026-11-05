@@ -2,11 +2,14 @@
 
 Actual native PI0.5 sampling/queue methods, evaluator rollout, and LiberoEnv
 reset/step methods are loaded by AST to avoid optional GPU/transformer/MuJoCo
-imports. Only the expensive backbone and simulator physics are tiny fixtures.
+imports. Native processor converters are loaded directly, so the policy sees
+the same transition envelope as deployment. Only the expensive backbone and
+simulator physics are tiny fixtures.
 """
 
 import ast
 import copy
+import importlib.util
 import json
 import os
 from collections import deque
@@ -130,8 +133,109 @@ def _observation(value=0.25):
     }
 
 
+@lru_cache(maxsize=1)
+def _native_transition_converters():
+    # Import the actual converter module without importing the optional tokenizer
+    # and every other processor from lerobot.processor.__init__.
+    path = ROOT / "src/lerobot/processor/converters.py"
+    spec = importlib.util.spec_from_file_location("task7_native_converters", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _native_processor_batch(batch):
+    converters = _native_transition_converters()
+    return converters.transition_to_batch(converters.batch_to_transition(batch))
+
+
 def _actions(policy, count=13):
-    return torch.stack([policy.select_action(_observation(index / 20)) for index in range(count)])
+    return torch.stack([
+        policy.select_action(_native_processor_batch(_observation(index / 20)))
+        for index in range(count)
+    ])
+
+
+def test_native_processor_envelope_preserves_inputs_actions_rng_and_observation_hash():
+    from lerobot.scripts.pi05_task7_full_sampling import observation_sha256
+
+    raw = _observation()
+    batch = _native_processor_batch(raw)
+    # These are inserted even when the raw deployment input has no labels.
+    assert set(batch) - set(raw) == {"action", "next.reward", "next.done", "next.truncated", "info"}
+    assert batch["action"] is None and batch["info"] == {}
+    assert batch["next.reward"] == 0.0
+    assert batch["next.done"] is False and batch["next.truncated"] is False
+    assert all(batch[key] is value for key, value in raw.items())
+
+    policy = TinyPolicy()
+    torch.manual_seed(234)
+    baseline = policy.select_action(batch)
+    expected_rng = torch.random.get_rng_state().clone()
+    policy.reset()
+    original_predict = policy.predict_action_chunk
+    forwarded = []
+
+    def capture_batch(item):
+        forwarded.append(item)
+        return original_predict(item)
+
+    policy.predict_action_chunk = capture_batch
+    torch.manual_seed(234)
+    with runtime.audit_policy(policy, "correct") as audit:
+        observed = policy.select_action(batch)
+    assert len(forwarded) == 1 and forwarded[0] is batch
+    torch.testing.assert_close(observed, baseline, rtol=0, atol=0)
+    torch.testing.assert_close(torch.random.get_rng_state(), expected_rng, rtol=0, atol=0)
+    assert audit["chunks"][0]["observation_sha256"] == observation_sha256(raw)
+    assert batch["action"] is None and batch["info"] == {}
+    assert all(batch[key] is value for key, value in raw.items())
+
+
+@pytest.mark.parametrize("reward,done,truncated", [
+    (0.0, False, False),
+    (torch.tensor(0.0), torch.tensor(False), torch.tensor(False)),
+    (torch.tensor([0.0]), torch.tensor([False]), torch.tensor([False])),
+])
+def test_default_transition_metadata_may_be_scalar_or_singleton_tensor(reward, done, truncated):
+    raw = _observation()
+    batch = _native_processor_batch(raw)
+    batch.update({"next.reward": reward, "next.done": done, "next.truncated": truncated})
+    observation = runtime._deployment_observation_batch(batch)
+    assert set(observation) == set(raw)
+    assert all(observation[key] is value for key, value in raw.items())
+    assert batch["next.reward"] is reward and batch["next.done"] is done
+    assert batch["next.truncated"] is truncated and batch["action"] is None
+
+
+@pytest.mark.parametrize("field,value", [
+    ("action", torch.zeros(1, 50, 7)),
+    ("action", torch.empty(0)),
+    ("action", []),
+    ("action_is_pad", torch.zeros(1, 50, dtype=torch.bool)),
+    ("future_action", None),
+    ("next.reward", 1.0),
+    ("next.reward", float("nan")),
+    ("next.reward", torch.zeros(2)),
+    ("next.done", True),
+    ("next.truncated", torch.tensor([True])),
+    ("info", {"future_action": torch.zeros(1, 50, 7)}),
+    ("info", []),
+])
+def test_populated_or_unknown_deployment_fields_fail_before_native_sampling(field, value):
+    policy = TinyPolicy()
+    batch = _native_processor_batch(_observation())
+    batch[field] = value
+    torch.manual_seed(234)
+    expected_rng = torch.random.get_rng_state().clone()
+    with runtime.audit_policy(policy, "correct") as audit:
+        with pytest.raises(ValueError) as error:
+            policy.select_action(batch)
+    assert field in str(error.value)
+    assert audit == {"chunks": [], "normalized_actions": []}
+    assert not policy._action_queue
+    torch.testing.assert_close(torch.random.get_rng_state(), expected_rng, rtol=0, atol=0)
 
 
 def test_correct_instrumentation_preserves_native_actions_rng_and_queue():
@@ -348,8 +452,8 @@ def _installed_fixture(tmp_path, monkeypatch, mode="correct", stop_after=15):
         successes = []
         for index in range(n_episodes):
             result = module.rollout(
-                env=env, policy=policy, env_preprocessor=lambda item: item,
-                env_postprocessor=lambda item: item, preprocessor=lambda item: item,
+                env=env, policy=policy, env_preprocessor=_native_processor_batch,
+                env_postprocessor=lambda item: item, preprocessor=_native_processor_batch,
                 # Distinguish the actual controller command from normalized output.
                 postprocessor=lambda action: action * 0.1 + 0.02,
                 seeds=[start_seed + index],
