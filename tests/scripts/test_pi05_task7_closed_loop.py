@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from lerobot.scripts import pi05_task7_closed_loop as closed
+from lerobot.scripts import pi05_task7_timepath_experiment as timepath
 
 
 def arguments(tmp_path, *extra):
@@ -21,31 +22,30 @@ def arguments(tmp_path, *extra):
 class FakeBackend:
     def __init__(self, args):
         self.args = args
+        self.timepath = timepath
+        self.record = {"selection": {"episode_index": 7}}
         args.directory.mkdir()
         args.tokenizer.mkdir()
         (args.tokenizer / "tokenizer.json").write_text("SYNTHETIC TOKENIZER FIXTURE")
         for name in ("manifest.json", "uniform.npz"):
             (args.directory / name).write_bytes(b"SYNTHETIC FIXTURE")
-        self.job = {"checkpoint": args.output_root / "time-input" / "checkpoints" / "001000" / "pretrained_model"}
+        self.job = {
+            "name": "fixture-time-input",
+            "checkpoint": args.output_root / "time-input" / "checkpoints" / "001000" / "pretrained_model",
+        }
         self.commands = []
         self.verified = []
 
     def prepare(self, args):
-        return {}, self.job, {"num_inference_steps": 10}
+        return self.record, self.job, {"num_inference_steps": 10}
 
     def fingerprint(self, checkpoint):
         return [["model.safetensors", 1, 1]]
 
     def spec(self, args, record, job, mode, scene, policy):
-        directory = args.output / "evaluations" / mode / f"scene{scene}-policy{policy}"
-        result = directory / "eval_info.json"
-        return {
-            "mode": mode, "scene_seed": scene, "policy_seed": policy,
-            "result": result, "shift_path": directory / "shift.json",
-            "shift_config": {"scene": scene, "policy": policy},
-            "config_path": directory / "time_intervention_config.json",
-            "config": closed.intervention_config(args, job, mode, scene, policy, result),
-        }
+        # Use the native directory contract: the shared shift config and its
+        # lock live one level above the model's result/.resume.lock directory.
+        return closed.Backend.spec(self, args, record, job, mode, scene, policy)
 
     def command_runner(self, command, log, env):
         config_path = Path(env["LIBERO_TASK7_TIME_INTERVENTION_CONFIG"])
@@ -105,7 +105,7 @@ def test_interventions_have_distinct_caches_and_native_rng_protocol(tmp_path, is
     assert report["settings"]["fixed_init_states"] == list(range(10))
     assert report["settings"]["executed_steps"] == 10
     assert report["settings"]["horizon"] == 50
-    configs = list(args.output.glob("evaluations/*/*/time_intervention_config.json"))
+    configs = list((args.output / "evaluations").rglob("time_intervention_config.json"))
     assert len(configs) == 12
     assert len({json.loads(path.read_text())["trace_directory"] for path in configs}) == 12
 
@@ -123,7 +123,7 @@ def test_wrong_intervention_cached_outcomes_fail_instead_of_being_reused(tmp_pat
     args = arguments(tmp_path)
     backend = FakeBackend(args)
     closed.run(args, backend=backend, command_runner=backend.command_runner, reporter=report_fixture)
-    path = next(args.output.glob("evaluations/zero/*/eval_info.json"))
+    path = next((args.output / "evaluations" / "zero").rglob("eval_info.json"))
     value = json.loads(path.read_text())
     value["intervention"] = "correct"
     path.write_text(json.dumps(value))
@@ -167,6 +167,14 @@ def empty_failed_attempt(tmp_path, isolated_hashes):
 
     def fail(command, log, env):
         directory = Path(env["LIBERO_TASK7_TIME_INTERVENTION_CONFIG"]).parent
+        config = json.loads((directory / "time_intervention_config.json").read_text())
+        spec = backend.spec(args, backend.record, backend.job, config["intervention"],
+                            config["scene_seed"], config["policy_seed"])
+        # The native timepath launcher always uses this real shared writer,
+        # even for object shifts with image noise disabled. Its historical
+        # lock filename must survive a failure before the first policy action.
+        timepath.previous.ensure_noise_config(spec["shift_path"], spec["shift_config"])
+        assert spec["shift_path"].parent == directory.parent
         (directory / "resume_manifest.json").write_text(json.dumps({"source": "before-fix"}))
         (directory / "resume_summary.json").write_text(json.dumps({
             "per_suite": {"libero_10": {"saved_episodes": 0, "successes": 0, "pc_success_saved": None}},
@@ -197,8 +205,13 @@ def test_source_fix_archives_empty_failed_attempt_and_preserves_unrelated_files(
 
     args, backend = empty_failed_attempt
     artifacts = {path.relative_to(args.output): path.read_bytes() for path in args.output.rglob("*")
-                 if path.is_file() and path.name not in (".pipeline.lock", ".resume.lock")}
+                 if path.is_file() and path.name not in (".pipeline.lock", ".resume.lock", ".fixed_image_noise.lock")}
     locks = {path: path.stat().st_ino for path in args.output.rglob("*.lock")}
+    assert {path.name for path in locks} == {".pipeline.lock", ".resume.lock", ".fixed_image_noise.lock"}
+    for path in locks:
+        if path.name == ".fixed_image_noise.lock":
+            assert (path.parent / "fixed_object_shift_config.json").is_file()
+            assert not (path.parent / ".resume.lock").exists()
     unrelated = [args.output / "notes.txt", args.output / "logs" / "other-experiment.log"]
     for path in unrelated:
         path.write_text("Keep unrelated user work\n")
@@ -239,6 +252,8 @@ def test_source_fix_archives_empty_failed_attempt_and_preserves_unrelated_files(
     "videos/libero_10_7/eval_episode_0.mp4",
     "recordings/episode_000000.parquet",
     "unknown_partial_result.tmp",
+    ".unknown.lock",
+    ".fixed_image_noise.lock",  # Legitimate only beside the shared shift config.
 ])
 def test_source_fix_cannot_archive_any_complete_or_partial_episode_evidence(empty_failed_attempt, monkeypatch, evidence):
     args, backend = empty_failed_attempt
@@ -327,7 +342,7 @@ def test_empty_failure_recovery_keeps_existing_comparison(empty_failed_attempt, 
     assert not (args.output / "empty_failed_attempts").exists()
 
 
-@pytest.mark.parametrize("name", ["shift.json", "time_intervention_config.json"])
+@pytest.mark.parametrize("name", ["fixed_object_shift_config.json", "time_intervention_config.json"])
 def test_empty_failure_recovery_rejects_changed_cell_configuration(empty_failed_attempt, monkeypatch, name):
     args, backend = empty_failed_attempt
     path = next((args.output / "evaluations").rglob(name))
@@ -358,11 +373,12 @@ def test_empty_failure_archive_error_restores_every_original_file(empty_failed_a
     assert backend.commands == []
 
 
-def test_empty_failure_recovery_cannot_replace_a_live_native_lock(empty_failed_attempt, monkeypatch):
+@pytest.mark.parametrize("name", [".resume.lock", ".fixed_image_noise.lock"])
+def test_empty_failure_recovery_cannot_replace_a_live_native_lock(empty_failed_attempt, monkeypatch, name):
     import fcntl
 
     args, backend = empty_failed_attempt
-    path = next((args.output / "evaluations").rglob(".resume.lock"))
+    path = next((args.output / "evaluations").rglob(name))
     inode = path.stat().st_ino
     changed_sources(monkeypatch)
     with path.open("a") as stream:

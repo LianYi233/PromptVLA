@@ -122,6 +122,15 @@ GPU_ID=0 bash run_analyze_task7_full_sampling.sh \
 
 原 `fig05` 的 **A 面板只画夹爪，B/C/D 的 MSE 已经平均了全部七维**。新增分析把这七维拆开，避免夹爪事件或某个动作维度掩盖其他维度；它不把七维误差乘以 7 当作另一条有效性证据。真实协调效果由后面的闭环执行检查。
 
+两个独立入口的产物不同：
+
+| 入口 | 所需数据/计算 | 生成的主要图 |
+|---|---|---|
+| `run_analyze_task7_seven_dim.sh` | 已保存的完整采样 JSON/NPZ，CPU 后处理 | `fig06_seven_dim_actions` 七维曲线、`fig07_seven_dim_error_changes` 逐维误差差值 |
+| `run_eval_task7_time_interventions.sh` | 现有 Time-Input checkpoint，三条件 GPU/MuJoCo 闭环 | 全部评测完成后生成 `fig08_closed_loop_success` 成功率、`fig09_execution_trajectories` 实测轨迹 |
+
+**已有完整采样数组时，可以先运行第一步直接出七维图，无需等待第二步闭环完成。** 独立闭环命令不自动调用七维离线分析；完整 `run_task7_train_eval.sh` 已按 `full_sampling → seven_dim_analysis → closed_loop` 顺序集成这两步。闭环入口会在准备及恢复检查前打印图名和标准目录结构下的七维绘图命令，提示命令不会自动运行。
+
 ### 第一步：已有数组直接出七维图，不重新推理
 
 ```bash
@@ -131,6 +140,20 @@ bash run_analyze_task7_seven_dim.sh \
 ```
 
 输入目录必须包含完整的 `full_sampling_evidence.json` 和 `full_sampling_arrays.npz`。脚本核对数组哈希、配对条件及原汇总值，不修改源结果。
+
+若这两个文件尚未生成，可先从已有 r2 checkpoint 补跑完整采样，再执行上面的 CPU 绘图命令：
+
+```bash
+GPU_ID=0 bash run_analyze_task7_full_sampling.sh \
+  --repeat 2 \
+  --tokenizer /data/models/paligemma-3b-pt-224 \
+  --probe-demos 8 --windows-per-demo 3 \
+  --noise-seeds 3000,4000,5000 \
+  --executed-steps 10 \
+  --output /data1/wyn/chkpt/2601-lerobot/PromptVLA/analysis/task7-train-eval/r2/full_sampling
+```
+
+这一补跑需要 GPU 推理，不重新训练，也不执行 MuJoCo。已有完整数组时无需补跑；如果之前的数组来自 r1，应使用实际 r1 的输入及输出目录，不把 r1 数据改名当作 r2。
 
 - `fig06_seven_dim_actions.png/.svg`：七行共享同一未来动作位置轴，记录目标与三种预测同图，前 10 步有阴影。示例仍按事先固定规则选择。
 - `fig07_seven_dim_error_changes.png/.svg`：两张 `7 × 50` 热图，分别为 `Zero − Correct`、`Reversed − Correct`。红色表示干预增加误差，蓝色表示减少误差；白色只说明差值小，不说明绝对误差小。
@@ -161,6 +184,8 @@ GPU_IDS=0,1 bash run_eval_task7_time_interventions.sh \
 旧版本可能在进度 `0/10` 时报告 `Deployment policy inputs may contain observations and task only`。原生 `PolicyProcessorPipeline` 的转换器会给观测 batch 自动补上 `action=None`、`next.reward=0.0`、`next.done=False`、`next.truncated=False` 和 `info={}`；这些是空占位字段。闭环审计现在接受这些默认值，仍拒绝非空动作标签、非默认结果字段和未知字段，并把原始 batch 原样交给原生 PI05。配对观测指纹仅包含观测和任务。
 
 更新代码后可以直接重跑上面的同一条命令。为避免旧失败尝试的实现指纹再次阻塞，入口仅在**上次状态为 failed、没有完成的 cell、没有任何 episode/task 结果或轨迹证据、其他冻结设置完全相同，且只有源码指纹发生变化**时，自动归档该次失败的配置、原生恢复清单、空进度文件和日志。归档保留在 `empty_failed_attempts/attempt-<unique>/`，包含原相对路径和 `recovery.json`；新 `closed_loop_state.json` 的 `recovered_empty_attempt` 字段记录归档位置。原有锁和无关文件保留。
+
+原生流程会在评测结果目录创建 `.resume.lock`，并在场景配置目录创建 `.fixed_image_noise.lock`；对象平移配置也使用这个共享配置写入锁。恢复器现在识别这两个**具体路径**，先检查能否取得锁，并保留原锁文件的 inode。锁文件存在本身不代表已生成 episode 结果；仍被进程占用的锁、其他未知锁文件和任何完整或部分结果仍会阻止自动恢复。如果旧版本把 `.fixed_image_noise.lock` 报为未知评测产物，更新后可用同一命令重新检查并恢复。
 
 如果已有完整或部分轨迹、已有评测结果、上次进程仍持锁，或修改了 checkpoint/tokenizer/种子/位移等设置，入口不会自动归档继续。源码或实验设置变更且已有结果时，应使用新的 `--output`，保留旧结果供核对；同一实现、同一设置下的正常断点续跑仍遵循原有核验规则。此次修复无需重新训练或修改 checkpoint。
 

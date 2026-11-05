@@ -162,6 +162,11 @@ def recover_empty_failed_attempt(output, settings, specs):
     metadata = set(configs) | {directory / name for directory in cell_directories
                               for name in ("resume_manifest.json", "resume_summary.json")}
     locks = {directory / ".resume.lock" for directory in cell_directories}
+    # The native timepath launcher writes the object-shift config through
+    # pi05_gripper_event_experiment.ensure_noise_config. That shared writer
+    # retains this historical lock name even when image noise is disabled.
+    # Its directory is the shared shift-config directory, not result.parent.
+    locks.update(spec["shift_path"].parent / ".fixed_image_noise.lock" for spec in specs)
     artifacts = {protocol_path, state_path}
 
     def check_empty_summary(path):
@@ -387,12 +392,31 @@ def settings_for(args, job, config, fingerprint):
     }
 
 
+def show_figure_outputs(args):
+    print(
+        f"Closed-loop figures after all cells complete: {args.output / 'fig08_closed_loop_success.png'} "
+        f"and {args.output / 'fig09_execution_trajectories.png'}.", flush=True,
+    )
+    print(
+        "Offline seven-dimensional figures (fig06/fig07) use run_analyze_task7_seven_dim.sh "
+        "with saved full_sampling_evidence.json/full_sampling_arrays.npz; no GPU inference is needed.",
+        flush=True,
+    )
+    print("For the standard sibling full_sampling cache:", flush=True)
+    print(shlex.join([
+        "bash", str(ROOT / "run_analyze_task7_seven_dim.sh"),
+        "--input", str(args.output.parent / "full_sampling"),
+        "--output", str(args.output.parent / "seven_dim"),
+    ]), flush=True)
+
+
 def show_plan(args):
     cells = len(args.scene_seeds) * len(args.test_policy_seeds)
     print("DRY RUN: no files are read/written; no models, training or MuJoCo are started.")
     print(f"Same Time-Input checkpoint; Correct / Zero / Reversed; {cells * 10} episodes per arm, {cells * 30} total.")
     print("Native 50-step chunks; execute 10 and reobserve. Same initial state/RNG, later observations may differ.")
     print("A new trajectory cache is required for Correct too; old success-only caches are not reused.")
+    show_figure_outputs(args)
     for index, (mode, scene, policy) in enumerate(
         (mode, scene, policy) for mode in MODES for scene in args.scene_seeds for policy in args.test_policy_seeds
     ):
@@ -407,6 +431,7 @@ def run(args, *, backend=None, command_runner=None, reporter=None):
         return None
     from lerobot.scripts.pi05_task7_train_eval import atomic_json, output_lock, run_logged, utc_now
 
+    show_figure_outputs(args)
     backend = Backend() if backend is None else backend
     command_runner = run_logged if command_runner is None else command_runner
     record, job, config = backend.prepare(args)
