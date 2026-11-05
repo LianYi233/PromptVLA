@@ -183,6 +183,23 @@ if [[ -n "${LIBERO_TASK7_OBJECT_SHIFT_CONFIG:-}" ]]; then
   fi
 fi
 
+# Same-checkpoint time-branch interventions have separate cache directories and
+# require complete physical execution traces as well as task-success flags.
+if [[ -n "${LIBERO_TASK7_TIME_INTERVENTION_CONFIG:-}" ]]; then
+  if [[ "$ENV_TYPE" != libero || "$TASKS" != libero_10 \
+        || "$LIBERO_SELECTED_TASK_ID" != 7 \
+        || -z "${LIBERO_TASK7_DUALSEED_SHIFT_CONFIG:-}" \
+        || -n "${LIBERO_ROBUSTNESS_MANIFEST:-}" \
+        || -n "${LIBERO_FIXED_NOISE_CONFIG:-}" ]]; then
+    echo "Time intervention requires the standard dual-seed task7 protocol" >&2
+    exit 2
+  fi
+  if [[ "$DRY_RUN" != true && ! -f "$LIBERO_TASK7_TIME_INTERVENTION_CONFIG" ]]; then
+    echo "Missing time-intervention configuration: $LIBERO_TASK7_TIME_INTERVENTION_CONFIG" >&2
+    exit 2
+  fi
+fi
+
 CKPT_ROOT="${CKPT_ROOT:-${DEFAULT_CKPT_ROOT}}"
 # Explicit BASE_CKPT overrides automatic checkpoint discovery only.
 BASE_CKPT="${BASE_CKPT:-${CKPT_ROOT}/${RUN_NAME}/checkpoints}"
@@ -391,6 +408,13 @@ elif os.environ.get("LIBERO_TASK7_OBJECT_SHIFT_CONFIG"):
     object_shift_manifest = install_task7_shift(
         module, os.environ["LIBERO_TASK7_OBJECT_SHIFT_CONFIG"]
     )
+time_intervention_manifest = {}
+if os.environ.get("LIBERO_TASK7_TIME_INTERVENTION_CONFIG"):
+    from lerobot.scripts.pi05_task7_closed_loop_runtime import install as install_time_intervention
+    from lerobot.scripts.pi05_task7_closed_loop_runtime import require_saved_traces
+    time_intervention_manifest = install_time_intervention(
+        module, os.environ["LIBERO_TASK7_TIME_INTERVENTION_CONFIG"]
+    )
 original_all = module.eval_policy_all
 original_one = module.run_one
 original_rollout = module.rollout
@@ -401,6 +425,11 @@ def argument(name):
 
 output = Path(argument("--output_dir")).resolve()
 model = Path(argument("--policy.path")).resolve()
+if time_intervention_manifest:
+    trace_config = time_intervention_manifest["task7_time_intervention"]["config"]
+    if (trace_config["checkpoint"] != str(model)
+            or trace_config["trace_directory"] != str(output / "trajectories")):
+        raise RuntimeError("Time intervention checkpoint/trajectory directory differs from this native run")
 output.mkdir(parents=True, exist_ok=True)
 lock = (output / ".resume.lock").open("a")
 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -430,6 +459,7 @@ manifest = {
     **fixed_noise_manifest,
     **object_shift_manifest,
     **dualseed_shift_manifest,
+    **time_intervention_manifest,
 }
 manifest_file = output / "resume_manifest.json"
 if manifest_file.exists():
@@ -456,6 +486,8 @@ def read_record(group, task_id, episodes):
         raise RuntimeError(f"Incomplete or invalid saved results: {p}")
     if attention_manifest:
         require_saved_attention_videos(metrics)
+    if time_intervention_manifest:
+        require_saved_traces(trace_config, successes=metrics["successes"])
     return metrics
 
 state = {"bar": None, "task_done": 0, "task_total": 0,

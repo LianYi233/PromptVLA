@@ -149,6 +149,25 @@ class FakeBackend:
                 "fig05_full_sampling_time_alignment.svg",
             ):
                 (output / name).write_bytes(b"synthetic output fixture")
+        elif module == pipeline.SEVEN_DIM_MODULE:
+            self.events.append("seven_dim")
+            for name in (
+                "seven_dim_evidence.json", "seven_dim_metrics.csv", "seven_dim_position_errors.csv.gz",
+                "fig06_seven_dim_actions.png", "fig06_seven_dim_actions.svg",
+                "fig07_seven_dim_error_changes.png", "fig07_seven_dim_error_changes.svg",
+                "all_windows_seven_dim.pdf",
+            ):
+                (output / name).write_bytes(b"synthetic output fixture")
+        elif module == pipeline.CLOSED_LOOP_MODULE:
+            self.events.append("closed_loop")
+            (output / "closed_loop_state.json").write_text(json.dumps({"status": "completed"}))
+            for name in (
+                "comparison-time-interventions.json", "closed_loop_evidence.json",
+                "closed_loop_paired_outcomes.csv", "fig08_closed_loop_success.png",
+                "fig08_closed_loop_success.svg", "fig09_execution_trajectories.png",
+                "fig09_execution_trajectories.svg", "all_episode_execution_traces.pdf",
+            ):
+                (output / name).write_bytes(b"synthetic output fixture")
         else:
             raise AssertionError(f"Unexpected child module: {module}")
 
@@ -174,6 +193,7 @@ def test_dry_run_works_without_site_packages_saved_plan_or_files(tmp_path):
     assert "No new calibration" in text
     assert text.index("[ONE-STEP FLOW") < text.index("[FULL DENOISING:")
     assert text.index("[FULL DENOISING:") < text.index("[COMPLETE ONLY AFTER")
+    assert text.index("[FULL DENOISING:") < text.index("[SEVEN-DIMENSION") < text.index("[SAME-CHECKPOINT CLOSED LOOP")
     sampling_line = next(line for line in text.splitlines() if pipeline.FULL_SAMPLING_MODULE in line)
     assert "--executed-steps 10" in sampling_line
     assert "--noise-seeds 3000,4000,5000" in sampling_line
@@ -194,6 +214,7 @@ def test_each_model_is_tested_immediately_then_paired_probe_runs(tmp_path, monke
     assert max(time_eval) < events.index("audit:rope,time_input")
     assert events.index("audit:rope,time_input") < events.index("constant") < events.index("evidence")
     assert events.index("evidence") < events.index("full_sampling")
+    assert events.index("full_sampling") < events.index("seven_dim") < events.index("closed_loop")
     assert result["status"] == "completed"
     report = json.loads((args.output / "comparison-fixed_protocol.json").read_text())
     assert report["protocol"] == "pi05-task7-fixed-protocol-v1"
@@ -226,6 +247,12 @@ def test_each_model_is_tested_immediately_then_paired_probe_runs(tmp_path, monke
     assert stage["executed_steps"] == 10
     assert stage["command"] == sampling
     assert len(result["full_sampling_outputs"]) == 4
+    closed_loop = next(command for command in backend.commands if pipeline.CLOSED_LOOP_MODULE in command)
+    assert closed_loop[closed_loop.index("--time-input-checkpoint") + 1] == str(backend.jobs[1]["checkpoint"])
+    assert closed_loop[closed_loop.index("--scene-seeds") + 1] == "20261103,20261104"
+    assert closed_loop[closed_loop.index("--test-policy-seeds") + 1] == "1001,1002,1003"
+    assert result["stages"]["closed_loop"]["episodes_per_condition"] == 60
+    assert result["stages"]["seven_dim_analysis"]["status"] == "completed"
 
 
 def test_training_failure_stops_before_any_evaluation_and_records_failure(tmp_path):
@@ -434,12 +461,14 @@ def test_logged_subprocess_propagates_failure_and_keeps_log(tmp_path):
 def test_inherited_gpu_and_intervention_overrides_are_removed(monkeypatch):
     for key in (
         "CUDA_VISIBLE_DEVICES", "LIBERO_TASK7_DUALSEED_SHIFT_CONFIG",
+        "LIBERO_TASK7_TIME_INTERVENTION_CONFIG",
         "LIBERO_FIXED_NOISE_CONFIG", "PI05_CADENCE_PLAN",
     ):
         monkeypatch.setenv(key, "unexpected")
     env = pipeline.process_environment()
     assert "CUDA_VISIBLE_DEVICES" not in env
     assert "LIBERO_TASK7_DUALSEED_SHIFT_CONFIG" not in env
+    assert "LIBERO_TASK7_TIME_INTERVENTION_CONFIG" not in env
     assert "LIBERO_FIXED_NOISE_CONFIG" not in env
     assert "PI05_CADENCE_PLAN" not in env
     assert env["DRY_RUN"] == "false"
@@ -467,3 +496,36 @@ def test_freezing_failure_is_recorded_in_journal(tmp_path, monkeypatch):
     assert state["status"] == "failed"
     assert state["stages"]["freeze_protocol"]["status"] == "failed"
     assert not backend.events
+
+
+@pytest.mark.parametrize("stage,module", [
+    ("seven_dim_analysis", pipeline.SEVEN_DIM_MODULE), ("closed_loop", pipeline.CLOSED_LOOP_MODULE),
+])
+def test_new_diagnostics_must_finish_before_pipeline_is_complete(tmp_path, stage, module):
+    args = arguments(tmp_path)
+    backend = FakeBackend(args)
+
+    def fail(command, log, env):
+        if module in command:
+            raise subprocess.CalledProcessError(8, command)
+        backend.command_runner(command, log, env)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        pipeline.run_pipeline(args, backend=backend, command_runner=fail)
+    state = json.loads((args.output / "pipeline_state.json").read_text())
+    assert state["status"] == state["stages"][stage]["status"] == "failed"
+    assert state["stages"]["full_sampling"]["status"] == "completed"
+
+
+def test_failed_closed_loop_state_cannot_be_marked_complete(tmp_path):
+    args = arguments(tmp_path)
+    backend = FakeBackend(args)
+
+    def failed_state(command, log, env):
+        backend.command_runner(command, log, env)
+        if pipeline.CLOSED_LOOP_MODULE in command:
+            (args.output / "closed_loop" / "closed_loop_state.json").write_text('{"status": "failed"}')
+
+    with pytest.raises(ValueError, match="all three traced"):
+        pipeline.run_pipeline(args, backend=backend, command_runner=failed_state)
+    assert json.loads((args.output / "pipeline_state.json").read_text())["status"] == "failed"

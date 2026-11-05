@@ -412,6 +412,10 @@ class LiberoEnv(gym.Env):
                 robot.controller.use_delta = True
         else:
             raise ValueError(f"Invalid control mode: {self.control_mode}")
+        if getattr(self, "_task7_execution_trace", None) is not None:
+            from lerobot.scripts.pi05_task7_closed_loop_runtime import record_environment_reset
+
+            record_environment_reset(self, raw_obs, seed)
         observation = self._format_raw_obs(raw_obs)
         info = {"is_success": False}
         return observation, info
@@ -424,6 +428,8 @@ class LiberoEnv(gym.Env):
                 f"Expected action to be 1-D (shape (action_dim,)), "
                 f"but got shape {action.shape} with ndim={action.ndim}"
             )
+        trace = getattr(self, "_task7_execution_trace", None)
+        trace_action = action.copy() if trace is not None and not trace["sealed"] else None
         raw_obs, reward, done, info = self._env.step(action)
 
         is_success = self._env.check_success()
@@ -436,11 +442,32 @@ class LiberoEnv(gym.Env):
                 "is_success": is_success,
             }
         )
+        if trace_action is not None:
+            from lerobot.scripts.pi05_task7_closed_loop_runtime import record_environment_step
+
+            # Capture the actual terminal state before the existing automatic
+            # reset below. No additional physics, observation refresh or RNG.
+            record_environment_step(
+                self, trace_action, raw_obs, reward=reward, success=is_success,
+                terminated=terminated, truncated=False,
+            )
         observation = self._format_raw_obs(raw_obs)
         if terminated:
             self.reset()
         truncated = False
         return observation, reward, terminated, truncated, info
+
+    def task7_start_trace(self, rollout_seed: int) -> dict[str, Any]:
+        """Opt-in worker-side capture, armed before the native episode reset."""
+        from lerobot.scripts.pi05_task7_closed_loop_runtime import arm_environment_trace
+
+        return arm_environment_trace(self, rollout_seed)
+
+    def task7_get_trace(self) -> dict[str, Any]:
+        """Return commands and actual states, retaining terminal data across reset."""
+        from lerobot.scripts.pi05_task7_closed_loop_runtime import collect_environment_trace
+
+        return collect_environment_trace(self)
 
     def close(self):
         if self._env is not None:

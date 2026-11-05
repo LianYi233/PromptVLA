@@ -43,6 +43,8 @@ TIMEPATH_MODULE = "lerobot.scripts.pi05_task7_timepath_experiment"
 CONSTANT_MODULE = "lerobot.scripts.pi05_task7_constant_action"
 EVIDENCE_MODULE = "lerobot.scripts.pi05_task7_time_evidence"
 FULL_SAMPLING_MODULE = "lerobot.scripts.pi05_task7_full_sampling"
+SEVEN_DIM_MODULE = "lerobot.scripts.pi05_task7_seven_dim"
+CLOSED_LOOP_MODULE = "lerobot.scripts.pi05_task7_closed_loop"
 # Match the frozen closed-loop entry point in run_eval_libero-full.sh.
 EXECUTED_ACTION_STEPS = 10
 
@@ -127,6 +129,7 @@ def process_environment() -> dict[str, str]:
         "CUDA_VISIBLE_DEVICES",
         "LIBERO_TASK7_OBJECT_SHIFT_CONFIG",
         "LIBERO_TASK7_DUALSEED_SHIFT_CONFIG",
+        "LIBERO_TASK7_TIME_INTERVENTION_CONFIG",
         "LIBERO_ROBUSTNESS_MANIFEST",
         "LIBERO_BENCHMARK",
         "LIBERO_FIXED_NOISE_CONFIG",
@@ -278,6 +281,29 @@ def full_sampling_command(args, checkpoint: Path | None = None) -> list[str]:
     return command
 
 
+def seven_dim_command(args) -> list[str]:
+    return [
+        sys.executable, "-u", "-m", SEVEN_DIM_MODULE,
+        "--input", str(args.output / "full_sampling"),
+        "--output", str(args.output / "seven_dim"),
+    ]
+
+
+def closed_loop_command(args, checkpoint: Path | None = None) -> list[str]:
+    command = [
+        sys.executable, "-u", "-m", CLOSED_LOOP_MODULE,
+        "--directory", str(args.directory), "--output-root", str(args.output_root),
+        "--repeat", str(args.repeat), "--tokenizer", str(args.tokenizer),
+        "--gpus", comma(args.gpu_ids), "--scene-seeds", comma(args.scene_seeds),
+        "--test-policy-seeds", comma(args.test_policy_seeds),
+        "--init-seed", str(args.init_seed), "--shift-m", str(args.shift_m),
+        "--output", str(args.output / "closed_loop"),
+    ]
+    if checkpoint is not None:
+        command.extend(["--time-input-checkpoint", str(checkpoint)])
+    return command
+
+
 def show_plan(args) -> None:
     print("DRY RUN: no files are read or written; no GPU, model, or saved plan is required.")
     print(
@@ -313,6 +339,11 @@ def show_plan(args) -> None:
     print("\n[FULL DENOISING: CORRECT / ZERO / REVERSED]")
     print("Same Time-Input weights, observations and pure initial noise; report first 10 and all 50 steps.")
     print(shlex.join(full_sampling_command(args)))
+    print("\n[SEVEN-DIMENSION OFFLINE ANALYSIS: NO NEW INFERENCE]")
+    print(shlex.join(seven_dim_command(args)))
+    print("\n[SAME-CHECKPOINT CLOSED LOOP: CORRECT / ZERO / REVERSED]")
+    print("Log actual executed actions and simulator states; new observations after each 10-step prefix.")
+    print(shlex.join(closed_loop_command(args)))
     print(f"\n[COMPLETE ONLY AFTER ALL STAGES SUCCEED] {args.output / 'pipeline_state.json'}")
 
 
@@ -669,6 +700,36 @@ def run_pipeline(args, *, backend=None, command_runner=run_logged) -> dict | Non
                 executed_steps=EXECUTED_ACTION_STEPS,
                 inference_steps="checkpoint_config",
             )
+            command = seven_dim_command(args)
+            log = args.output / "logs" / "seven-dim.log"
+            journal.start("seven_dim_analysis", command=command, log=log)
+            command_runner(command, log, env)
+            seven_dim_files = required_outputs(args.output / "seven_dim", (
+                "seven_dim_evidence.json", "seven_dim_metrics.csv",
+                "seven_dim_position_errors.csv.gz", "fig06_seven_dim_actions.png",
+                "fig06_seven_dim_actions.svg", "fig07_seven_dim_error_changes.png",
+                "fig07_seven_dim_error_changes.svg", "all_windows_seven_dim.pdf",
+            ))
+            journal.finish("seven_dim_analysis", outputs=seven_dim_files)
+            command = closed_loop_command(args, checkpoints["time_input"])
+            log = args.output / "logs" / "closed-loop.log"
+            journal.start("closed_loop", command=command, log=log)
+            command_runner(command, log, env)
+            closed_loop_files = required_outputs(args.output / "closed_loop", (
+                "closed_loop_state.json", "comparison-time-interventions.json",
+                "closed_loop_evidence.json", "closed_loop_paired_outcomes.csv",
+                "fig08_closed_loop_success.png", "fig08_closed_loop_success.svg",
+                "fig09_execution_trajectories.png", "fig09_execution_trajectories.svg",
+                "all_episode_execution_traces.pdf",
+            ))
+            closed_loop_state = json.loads(Path(closed_loop_files[0]).read_text())
+            if closed_loop_state.get("status") != "completed":
+                raise ValueError("Closed-loop stage did not finish all three traced conditions")
+            journal.finish(
+                "closed_loop", outputs=closed_loop_files,
+                checkpoint=str(checkpoints["time_input"]), conditions=["correct", "zero", "reversed"],
+                episodes_per_condition=10 * len(args.scene_seeds) * len(args.test_policy_seeds),
+            )
             for job in jobs:
                 if backend.fingerprint(job["checkpoint"]) != fingerprints[job["case"]]:
                     raise ValueError(f"Checkpoint changed while generating evidence: {job['checkpoint']}")
@@ -676,6 +737,7 @@ def run_pipeline(args, *, backend=None, command_runner=run_logged) -> dict | Non
                 comparison_json=str(comparison), constant_outputs=constant_files,
                 evidence_outputs=evidence_files,
                 full_sampling_outputs=full_sampling_files,
+                seven_dim_outputs=seven_dim_files, closed_loop_outputs=closed_loop_files,
             )
         except BaseException as exc:
             journal.fail(exc)
@@ -687,6 +749,8 @@ def run_pipeline(args, *, backend=None, command_runner=run_logged) -> dict | Non
         f"Full-sampling alignment figure: {args.output / 'full_sampling' / 'fig05_full_sampling_time_alignment.png'}",
         flush=True,
     )
+    print(f"Seven-dimensional action figures: {args.output / 'seven_dim'}", flush=True)
+    print(f"Closed-loop success and execution trajectories: {args.output / 'closed_loop'}", flush=True)
     print(
         "The plots report measured gains or losses; completing the pipeline does not "
         "prejudge whether correct time correspondence improves prediction.", flush=True,

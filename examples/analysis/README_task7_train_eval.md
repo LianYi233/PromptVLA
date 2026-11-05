@@ -1,6 +1,6 @@
 # Task7：训练后自动评测与时间对应关系诊断
 
-本入口把已有的 **RoPE / Time-Input 两组训练、双种子闭环评测、常量动作检查、单步 Flow 探针，以及从纯噪声开始的完整采样对照** 串在一起。默认保留原来的 Task7 单示教、1000 更新、双 GPU、每卡 batch32、VLM2 + 完整 Action Expert 设置。每个模型训练结束并通过审计后，立即评测该模型；全部完成后自动出图。
+本入口把 **RoPE / Time-Input 两组训练、双种子闭环评测、常量动作检查、单步 Flow 探针、从纯噪声开始的完整采样对照、七维动作分析，以及同一 Time-Input checkpoint 的三条件闭环测试** 串在一起。默认保留原来的 Task7 单示教、1000 更新、双 GPU、每卡 batch32、VLM2 + 完整 Action Expert 设置。每个模型训练结束并通过审计后，立即评测该模型；全部完成后自动出图。
 
 ## 一条命令启动
 
@@ -40,7 +40,7 @@ GPU_IDS=0,1 bash run_task7_train_eval.sh --repeat 1 --reuse-existing
 GPU_IDS=0,1 bash run_task7_train_eval.sh --repeat 1 --skip-training
 ```
 
-流程会重新审计现有模型、校验并复用已经完成的闭环评测，然后重新生成常量动作图、单步 Flow 探针图和完整采样对照图。无需重新训练、删除评测缓存或更换 repeat。只有全部机制分析产物生成后，`pipeline_state.json` 才会标记为完成。
+流程会重新审计现有模型、校验并复用已经完成的原始双模型闭环评测，然后生成离线机制图，并完成新增的三条件闭环轨迹测试。无需重新训练、删除旧评测缓存或更换 repeat。三条件轨迹测试使用独立缓存，首次运行时 Correct 也要执行。只有全部阶段成功，`pipeline_state.json` 才会标记为完成。
 
 ## 实际执行顺序
 
@@ -52,6 +52,8 @@ GPU_IDS=0,1 bash run_task7_train_eval.sh --repeat 1 --skip-training
 6. 读取训练后的时间投影，生成重复同一动作 50 次的输入诊断图。
 7. 在完整模型上运行真实动作片段的单步 Flow 探针，保留旧的 `fig04` 机制图。
 8. 使用同一个 Time-Input checkpoint，从相同纯噪声完成 Correct / Zero / Reversed 三组原生采样，生成 `fig05`，分别报告前 10 步和完整 50 步。
+9. 直接读取第 8 步的数组，生成七维逐维曲线、误差差值热图、逐条件数据和全部预选窗口图册。该步骤不加载模型。
+10. 同一个 Time-Input checkpoint 分别运行 Correct / Zero / Reversed 三组真实闭环测试，记录实际执行动作、末端位姿、夹爪关节状态、物体位姿和官方成功标记，生成配对成功率及实测轨迹图。
 
 任一训练、审计、评测或绘图阶段失败，流程停止并把失败阶段写入 `pipeline_state.json`。不会把缺失评测当作失败 episode，也不会输出一个看似完整的最终报告。再次执行同一设置时可显式使用 `--reuse-existing`；修改已冻结的评测设置时使用新的 `--output` 目录。
 
@@ -64,7 +66,8 @@ GPU_IDS=0,1 bash run_task7_train_eval.sh --repeat 1 --skip-training
 | 策略推理种子 | `1001,1002,1003` |
 | 初始状态 | 每个组合固定 `0..9` |
 | 平移强度 | `0.12 m` |
-| 评测次数 | 每个模型 `2 × 3 × 10 = 60`，两模型共 120 |
+| 原始双模型评测次数 | 每个模型 `2 × 3 × 10 = 60`，两模型共 120，可校验复用旧缓存 |
+| 新增三条件闭环次数 | 同一 Time-Input checkpoint 每个条件 60，三条件共 180，独立轨迹缓存 |
 | 训练 | 双 GPU，每卡 batch32，1000 更新 |
 
 这套场景沿用之前的 Task7 压力测试设置，可能包含历史校准选择。新流程将其标记为 **`fixed_protocol`**：不依据新 checkpoint 的表现重新筛选场景，也不要求测试时 RoPE 必须落在 40%–50%。它不是未经选择的场景总体测试。
@@ -114,6 +117,65 @@ GPU_ID=0 bash run_analyze_task7_full_sampling.sh \
 `Zero − Correct` 和 `Reversed − Correct` 为正，表示干预后动作误差增加；为负，表示干预后误差下降。输出差异只能说明分支影响了模型，不能单独说明正确对应更好。应同时看前 10 步、完整 50 步与不同示教上的配对差值，保留零收益和负收益。完整采样仍是离线预测，不等于机器人执行轨迹或任务成功率；与单条示教动作的误差也不能覆盖所有合理的动作解。
 
 继续使用 `run_task7_train_eval.sh` 时，这一步会自动成为 `full_sampling` 阶段。旧的 `fixed_protocol.json` 和冻结设置保持兼容；`pipeline_state.json` 记录新阶段命令、所用 checkpoint、条件与分析区间，只有四个新产物全部生成才会标记该阶段完成。单独运行分析脚本不会改写原来的 pipeline 状态。
+
+## 七维动作与真实闭环协调：复用现有结果继续实验
+
+原 `fig05` 的 **A 面板只画夹爪，B/C/D 的 MSE 已经平均了全部七维**。新增分析把这七维拆开，避免夹爪事件或某个动作维度掩盖其他维度；它不把七维误差乘以 7 当作另一条有效性证据。真实协调效果由后面的闭环执行检查。
+
+### 第一步：已有数组直接出七维图，不重新推理
+
+```bash
+bash run_analyze_task7_seven_dim.sh \
+  --input /data1/wyn/chkpt/2601-lerobot/PromptVLA/analysis/task7-train-eval/r2/full_sampling \
+  --output /data1/wyn/chkpt/2601-lerobot/PromptVLA/analysis/task7-train-eval/r2/seven_dim
+```
+
+输入目录必须包含完整的 `full_sampling_evidence.json` 和 `full_sampling_arrays.npz`。脚本核对数组哈希、配对条件及原汇总值，不修改源结果。
+
+- `fig06_seven_dim_actions.png/.svg`：七行共享同一未来动作位置轴，记录目标与三种预测同图，前 10 步有阴影。示例仍按事先固定规则选择。
+- `fig07_seven_dim_error_changes.png/.svg`：两张 `7 × 50` 热图，分别为 `Zero − Correct`、`Reversed − Correct`。红色表示干预增加误差，蓝色表示减少误差；白色只说明差值小，不说明绝对误差小。
+- `seven_dim_evidence.json`、`seven_dim_metrics.csv`：前 10 步与全 50 步的逐维、前三维、后三个方向控制维度、夹爪、总体指标，包含 MSE、配对差值、示教级区间及输出变化 RMS。
+- `seven_dim_position_errors.csv.gz`：全部窗口、噪声、位置、维度的误差贡献及聚合权重。可据此追查原图 demo286 附近的局部红块，不丢弃该示教。
+- `all_windows_seven_dim.pdf`：按预先确定的窗口顺序逐页显示，每个窗口固定使用最小噪声种子。统计仍使用全部噪声；没有根据结果挑选有利窗口。
+
+动作图仍使用归一化控制量。维度 0–2 / 3–5 的分组注明标准七维 LIBERO 控制约定，不把旋转控制量随意命名成欧拉角，不把曲线直接解释为米或角度，也不对其累加生成所谓真实末端轨迹。Bootstrap 的单位是示教，窗口和噪声先在示教内平均；区间只描述这个 checkpoint 上的示教采样变化。
+
+### 第二步：一个 checkpoint，三条件原生闭环执行
+
+```bash
+GPU_IDS=0,1 bash run_eval_task7_time_interventions.sh \
+  --repeat 2 \
+  --tokenizer /data/models/paligemma-3b-pt-224 \
+  --scene-seeds 20261103,20261104 \
+  --test-policy-seeds 1001,1002,1003 \
+  --shift-m 0.12 \
+  --output /data1/wyn/chkpt/2601-lerobot/PromptVLA/analysis/task7-train-eval/r2/closed_loop
+```
+
+两条命令都可加 `--dry-run` 检查计划而不写入结果。第二步不启动训练、不加载独立 RoPE 模型，不重新跑旧单步 Flow 探针。`GPU_IDS=0` 也能顺序执行这个闭环入口；这不改变双 GPU 训练配方。显式 `--time-input-checkpoint` 必须与计划、`--output-root` 和 `--repeat` 指定的最终 Time-Input checkpoint 一致，避免原生评估器意外读取另一个模型。
+
+默认共 **180 个完整 episode**，每条件 60。首次执行会重新跑 Correct，因为旧成功率缓存没有所需轨迹。每个条件、场景种子和策略种子的目录独立；成功率、模型文件、扰动设置、干预配置、实现指纹和十条轨迹全部核验后才复用。中途失败会记录在 `closed_loop_state.json`；用相同命令重跑，已完整完成且核验通过的 cell 可复用，不完整 cell 按原生评估粒度重跑。
+
+每个 episode 的三种条件使用同一官方初始状态与场景位移，保留原有 `SHA256(policy_seed, init_slot)` 推理随机流。采样仍调用原生 `select_action` / `predict_action_chunk`：每次生成 50 步，执行前 10 步后再次观测，Flow 步数来自 checkpoint。记录器核对对应 chunk 的噪声哈希、去噪起点、完整去噪步骤和实际动作队列。**三种条件动作不同时，后续观测自然会不同；不能继续强行提供同一份观测并称为闭环。**
+
+每条 `episode-000.json` 到 `episode-009.json` 记录：
+
+- 七维模型输出、实际经过后处理送进环境的七维动作、chunk 编号和执行位置。
+- 重置并静置后的初始仿真状态指纹；每一步实测末端位置/姿态、夹爪关节状态、任务物体位姿。
+- 可用的原始接触信息、官方任务成功标记、终止/超时原因；不把夹爪命令的正负号推断为抓住或释放。
+- 初始噪声和观测哈希、原生去噪次数、模型与干预配置等来源信息。
+
+终止步状态在 LIBERO 自动 reset **之前**保存，避免把下一局初始状态错误地画成该局终点。这里只记录用于分析的状态信息，**不声称这些 JSON 是可恢复的完整 MuJoCo/控制器快照**；共同状态短分叉实验仍是后续按需要增加的独立实验。
+
+### 新图如何回答“七维共同作用有没有收益”
+
+`fig08_closed_loop_success` 给出三条件的官方成功/失败配对矩阵、Correct 独赢与干预独赢次数，以及分场景成功率差。主要比较 **Correct vs Zero**，Reversed 作为辅助；保留收益、损失和平局。推理随机种子不当作独立训练种子，固定两场景的结果不包装成对所有场景的统计保证。
+
+`fig09_execution_trajectories` 把三条实际末端轨迹并排显示，标出夹爪命令符号变化时末端所在位置，同时显示实测夹爪关节状态与物体高度变化。姿态信息显示在预定关键帧。这样可检查“手臂到达物体附近时，夹爪命令/实际关节状态怎样变化；物体是否随后抬起”，而不是只看夹爪曲线的跳变是否接近示教第 18 步。命令跳变仍不自动等于抓取、接触或释放事件。
+
+代表 episode 固定为第一个声明的 scene/policy 与初始状态 0，不按成功与否挑选。`all_episode_execution_traces.pdf` 收录全部预声明的配对 episode；`closed_loop_evidence.json` 同时提供逐场景、逐策略种子、逐 cell 的统计与逐 episode 路径。路径长短和动作差异是行为描述，最终是否有帮助仍看官方任务完成结果。
+
+未来完整训练用 `run_task7_train_eval.sh` 时，两步分别自动记录为 `seven_dim_analysis` 和 `closed_loop` 阶段；原冻结设置兼容，新闭环协议另写 `closed_loop_protocol.json`。单独执行以上两个入口不会把旧 `pipeline_state.json` 冒充为已跑过全部新阶段。
 
 ## 单步 Flow 机制图：保留原有诊断
 
@@ -207,6 +269,26 @@ bash run_analyze_task7_time_evidence.sh \
         fig05_full_sampling_time_alignment.svg
         full_sampling_evidence.json
         full_sampling_arrays.npz
+    seven_dim/
+        seven_dim_evidence.json
+        seven_dim_metrics.csv
+        seven_dim_position_errors.csv.gz
+        fig06_seven_dim_actions.png
+        fig07_seven_dim_error_changes.png
+        all_windows_seven_dim.pdf
+    closed_loop/
+        closed_loop_protocol.json
+        closed_loop_state.json
+        comparison-time-interventions.json
+        closed_loop_evidence.json
+        closed_loop_paired_outcomes.csv
+        fig08_closed_loop_success.png
+        fig09_execution_trajectories.png
+        all_episode_execution_traces.pdf
+        evaluations/{correct,zero,reversed}/...
+            resume_manifest.json
+            eval_info.json
+            trajectories/episode-000.json ... episode-009.json
 ```
 
 使用 `--output` 指定另一目录。训练 checkpoint 和原始闭环评测仍保留原有目录结构，不由分析目录替代。
@@ -218,10 +300,14 @@ python -m pytest -q \
   tests/scripts/test_pi05_task7_train_eval.py \
   tests/scripts/test_pi05_task7_full_sampling.py \
   tests/scripts/test_pi05_task7_full_sampling_outputs.py \
+  tests/scripts/test_pi05_task7_seven_dim.py \
+  tests/scripts/test_pi05_task7_closed_loop.py \
+  tests/scripts/test_pi05_task7_closed_loop_runtime.py \
+  tests/scripts/test_pi05_task7_closed_loop_report.py \
   tests/scripts/test_pi05_task7_time_evidence.py \
   tests/scripts/test_pi05_task7_dualseed_evidence.py \
   tests/scripts/test_pi05_task7_constant_action.py \
   tests/scripts/test_pi05_task7_dualseed.py
 ```
 
-这些 CPU 测试验证真实 PI05 配置的保存/解析、调度顺序、失败停止、checkpoint 选择、阶段采样、时间干预、按示教聚合及数据驱动绘图。配置回归测试使用真实 draccus 解析器，仅替换大模型权重和 tokenizer 加载。完整 3B 模型、数据视频读取、DDP 训练和 MuJoCo 闭环评测仍需要服务器环境。
+这些 CPU 测试验证真实 PI05 配置的保存/解析、调度顺序、失败停止、checkpoint 选择、原生采样/动作队列、时间干预、终止状态保留、配对初始状态与噪声审计、逐维误差/示教聚合及数据驱动绘图。配置回归测试使用真实 draccus 解析器，重量级模型、tokenizer 和仿真器在相关测试中替换为小型测试对象。完整 3B 模型、数据视频读取、DDP 训练和 MuJoCo 闭环评测仍需要服务器环境。
